@@ -1693,6 +1693,12 @@ module.exports = {
   },
 
   async getRevenueAnalytics() {
+    const toDateStr = (val) => {
+      if (!val) return '';
+      if (val instanceof Date) return val.toISOString();
+      return String(val);
+    };
+
     const bookings = await this.getBookings();
     const duties = await this.getDuties();
     const now = new Date();
@@ -1701,13 +1707,13 @@ module.exports = {
     yesterday.setDate(yesterday.getDate() - 1);
     const yestStr = yesterday.toISOString().slice(0, 10);
 
-    const todayBookings = bookings.filter(b => b.status !== 'CANCELLED' && ((b.created_at || '').startsWith(todayStr) || (b.journey_date || '') === todayStr));
-    const todayDuties = duties.filter(d => (d.duty_date || '').startsWith(todayStr) || (d.created_at || '').startsWith(todayStr));
+    const todayBookings = bookings.filter(b => b.status !== 'CANCELLED' && (toDateStr(b.created_at).startsWith(todayStr) || toDateStr(b.journey_date) === todayStr));
+    const todayDuties = duties.filter(d => toDateStr(d.duty_date).startsWith(todayStr) || toDateStr(d.created_at).startsWith(todayStr));
     const todayRevenue = todayBookings.reduce((sum, b) => sum + (Number(b.quoted_amount) || 0), 0) +
                          todayDuties.reduce((sum, d) => sum + ((Number(d.daily_km) || 0) * 16), 0);
 
-    const yestBookings = bookings.filter(b => b.status !== 'CANCELLED' && ((b.created_at || '').startsWith(yestStr) || (b.journey_date || '') === yestStr));
-    const yestDuties = duties.filter(d => (d.duty_date || '').startsWith(yestStr) || (d.created_at || '').startsWith(yestStr));
+    const yestBookings = bookings.filter(b => b.status !== 'CANCELLED' && (toDateStr(b.created_at).startsWith(yestStr) || toDateStr(b.journey_date) === yestStr));
+    const yestDuties = duties.filter(d => toDateStr(d.duty_date).startsWith(yestStr) || toDateStr(d.created_at).startsWith(yestStr));
     const yestRevenue = yestBookings.reduce((sum, b) => sum + (Number(b.quoted_amount) || 0), 0) +
                         yestDuties.reduce((sum, d) => sum + ((Number(d.daily_km) || 0) * 16), 0);
 
@@ -1717,8 +1723,8 @@ module.exports = {
       d.setDate(d.getDate() - i);
       const ds = d.toISOString().slice(0, 10);
       const dayName = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-      const dayB = bookings.filter(b => b.status !== 'CANCELLED' && ((b.created_at || '').startsWith(ds) || (b.journey_date || '') === ds));
-      const dayD = duties.filter(dut => (dut.duty_date || '').startsWith(ds) || (dut.created_at || '').startsWith(ds));
+      const dayB = bookings.filter(b => b.status !== 'CANCELLED' && (toDateStr(b.created_at).startsWith(ds) || toDateStr(b.journey_date) === ds));
+      const dayD = duties.filter(dut => toDateStr(dut.duty_date).startsWith(ds) || toDateStr(dut.created_at).startsWith(ds));
       const rev = dayB.reduce((s, b) => s + (Number(b.quoted_amount) || 0), 0) +
                   dayD.reduce((s, dut) => s + ((Number(dut.daily_km) || 0) * 16), 0);
       last7Days.push({
@@ -1734,8 +1740,8 @@ module.exports = {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const monthlyBreakdown = months.map((mName, mIdx) => {
       const monthPrefix = `${currentYear}-${String(mIdx + 1).padStart(2, '0')}`;
-      const mBookings = bookings.filter(b => b.status !== 'CANCELLED' && ((b.created_at || '').startsWith(monthPrefix) || (b.journey_date || '').startsWith(monthPrefix)));
-      const mDuties = duties.filter(d => (d.duty_date || '').startsWith(monthPrefix) || (d.created_at || '').startsWith(monthPrefix));
+      const mBookings = bookings.filter(b => b.status !== 'CANCELLED' && (toDateStr(b.created_at).startsWith(monthPrefix) || toDateStr(b.journey_date).startsWith(monthPrefix)));
+      const mDuties = duties.filter(d => toDateStr(d.duty_date).startsWith(monthPrefix) || toDateStr(d.created_at).startsWith(monthPrefix));
       const bRev = mBookings.reduce((s, b) => s + (Number(b.quoted_amount) || 0), 0);
       const dRev = mDuties.reduce((s, d) => s + ((Number(d.daily_km) || 0) * 16), 0);
       const totalRev = bRev + dRev;
