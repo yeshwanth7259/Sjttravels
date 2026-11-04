@@ -130,7 +130,7 @@ const INITIAL_USERS = [
     email: 'admin@sjttravels.com',
     password: 'admin123',
     name: 'SJT Chief Administrator',
-    phone: '+91 93534 62672',
+    phone: '+91 99009 75920',
     role: 'ADMIN',
     assigned_vehicle: null,
     duty_mode: 'OFF_DUTY',
@@ -827,6 +827,9 @@ module.exports = {
   },
 
   async startDuty(dutyData) {
+    const dutyNow = new Date();
+    const dutyDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(dutyNow);
+    const loginTime = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(dutyNow);
     const dutyCode = `DUTY-${Math.floor(1000 + Math.random() * 9000)}`;
     const newDuty = {
       id: dutyData.id || crypto.randomUUID(),
@@ -835,8 +838,11 @@ module.exports = {
       driver_name: dutyData.driver_name || 'Driver',
       company_name: dutyData.company_name,
       external_trip_id: dutyData.external_trip_id,
+      pickup_location: dutyData.pickup_location,
+      destination_location: dutyData.destination_location,
+      route_details: dutyData.route_details || '',
       vehicle_reg: dutyData.vehicle_reg || 'KA01AE1234',
-      login_time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      login_time: loginTime,
       logout_time: null,
       start_km: Number(dutyData.start_km),
       end_km: null,
@@ -847,7 +853,7 @@ module.exports = {
       duty_face_verified: dutyData.duty_face_verified !== false,
       duty_face_match_score: dutyData.duty_face_match_score || 99.1,
       status: 'ON_DUTY',
-      duty_date: new Date().toISOString().split('T')[0],
+      duty_date: dutyDate,
       admin_note: null,
       created_at: new Date().toISOString()
     };
@@ -880,7 +886,7 @@ module.exports = {
         daily_km: totalKm,
         toll_parking_allowance: Number(toll_parking) || 0,
         food_allowance: Number(food_allowance) || 0,
-        logout_time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        logout_time: new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(new Date()),
         status: 'SUBMITTED'
       };
 
@@ -1148,27 +1154,32 @@ module.exports = {
     const duties = await this.getDuties();
     const bookings = await this.getBookings();
     const now = new Date();
-    const selectedMonth = monthYear || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const indiaDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(now);
+    const selectedMonth = monthYear || indiaDate.slice(0, 7);
 
     return drivers.map(drv => {
       const driverDuties = duties.filter(d => 
         (d.driver_id === drv.id || (d.driver_name && d.driver_name.toLowerCase() === drv.name.toLowerCase())) &&
-        (d.duty_date || d.created_at || '').startsWith(selectedMonth)
+        (d.duty_date || d.created_at || '').startsWith(selectedMonth) && d.status !== 'REJECTED'
       );
 
       const uniqueDays = new Set(driverDuties.map(d => d.duty_date || (d.created_at ? d.created_at.slice(0, 10) : '')));
       uniqueDays.delete('');
       const daysWorked = uniqueDays.size;
 
-      const totalKm = driverDuties.reduce((s, d) => s + (Number(d.daily_km) || 0), 0);
+      const completedDuties = driverDuties.filter(d => d.logout_time && Number(d.end_km) >= Number(d.start_km) && ['SUBMITTED', 'VERIFIED', 'VERIFIED_BY_ADMIN'].includes(String(d.status).toUpperCase()));
+      const totalKm = completedDuties.reduce((s, d) => s + (Number(d.daily_km) || 0), 0);
       const totalTollParking = driverDuties.reduce((s, d) => s + (Number(d.toll_parking_allowance) || 0), 0);
       const totalFoodAllowance = driverDuties.reduce((s, d) => s + (Number(d.food_allowance) || 0), 0);
       const totalDutyAllowance = totalTollParking + totalFoodAllowance;
 
-      const baseSalary = 18000;
+      const salarySettings = drv.monthlySalarySettings || {};
+      const baseSalary = Number(salarySettings.baseSalary) || 0;
+      const perKmRate = Number(salarySettings.perKmRate) || 0;
+      const perDutyAllowance = Number(salarySettings.perDutyAllowance) || 0;
       const attendanceBonus = daysWorked * 250; // daily attendance incentive
-      const kmIncentive = Math.round(totalKm * 2.5);
-      const grossSalary = baseSalary + attendanceBonus + kmIncentive + totalDutyAllowance;
+      const kmIncentive = Math.round(totalKm * perKmRate);
+      const grossSalary = baseSalary + attendanceBonus + kmIncentive + (completedDuties.length * perDutyAllowance) + totalDutyAllowance;
       const deductions = 0;
       const netPayable = grossSalary - deductions;
 
@@ -1185,12 +1196,14 @@ module.exports = {
         assigned_vehicle: drv.assignedVehicleReg,
         month: selectedMonth,
         days_present: daysWorked,
-        total_duties_completed: driverDuties.length,
+        total_duties_completed: completedDuties.length,
         total_passenger_trips: assignedTrips.length,
         total_km: totalKm,
         base_salary: baseSalary,
         attendance_bonus: attendanceBonus,
         km_incentive: kmIncentive,
+        per_km_rate: perKmRate,
+        per_duty_allowance: completedDuties.length * perDutyAllowance,
         daily_allowances: totalDutyAllowance,
         deductions,
         gross_salary: grossSalary,

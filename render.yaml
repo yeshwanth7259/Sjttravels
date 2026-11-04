@@ -4,7 +4,7 @@ services:
     env: node
     plan: free
     region: singapore
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
@@ -12,3 +12,49 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: DATABASE_URL
+        sync: false
+      - key: SJT_SESSION_SECRET
+        sync: false
+      - key: SJT_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: SJT_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: SJT_BOOTSTRAP_ADMIN_NAME
+        sync: false
+      - key: SJT_BOOTSTRAP_ADMIN_PHONE
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: SJT_AIRPORT_FEE
+        value: 100
+      - key: SJT_LOCAL_SEDAN_BASE_FARE
+        value: 100
+      - key: SJT_LOCAL_SEDAN_INCLUDED_KM
+        value: 4
+      - key: SJT_LOCAL_SEDAN_PER_KM
+        value: 24
+      - key: SJT_LOCAL_MPV_BASE_FARE
+        value: 115
+      - key: SJT_LOCAL_MPV_INCLUDED_KM
+        value: 4
+      - key: SJT_LOCAL_MPV_PER_KM
+        value: 28
+      - key: SJT_LOCAL_INNOVA_BASE_FARE
+        value: 130
+      - key: SJT_LOCAL_INNOVA_INCLUDED_KM
+        value: 4
+      - key: SJT_LOCAL_INNOVA_PER_KM
+        value: 32
+      - key: SJT_S3_ENDPOINT
+        sync: false
+      - key: SJT_S3_BUCKET
+        sync: false
+      - key: SJT_S3_REGION
+        sync: false
+      - key: SJT_S3_ACCESS_KEY_ID
+        sync: false
+      - key: SJT_S3_SECRET_ACCESS_KEY
+        sync: false

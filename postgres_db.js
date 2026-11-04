@@ -2,7 +2,29 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { promisify } = require('util');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+
+const scrypt = promisify(crypto.scrypt);
+const isPasswordHash = value => typeof value === 'string' && value.startsWith('scrypt$');
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = await scrypt(password, salt, 64);
+  return `scrypt$${salt}$${derived.toString('hex')}`;
+}
+async function verifyPassword(password, stored) {
+  if (isPasswordHash(stored)) {
+    const [, salt, expectedHex] = stored.split('$');
+    if (!salt || !/^[0-9a-f]{128}$/i.test(expectedHex || '')) return { valid: false, needsRehash: false };
+    const expected = Buffer.from(expectedHex, 'hex');
+    const actual = await scrypt(password, salt, expected.length);
+    return { valid: crypto.timingSafeEqual(actual, expected), needsRehash: false };
+  }
+  const supplied = Buffer.from(String(password));
+  const legacy = Buffer.from(String(stored || ''));
+  const valid = supplied.length === legacy.length && crypto.timingSafeEqual(supplied, legacy);
+  return { valid, needsRehash: valid };
+}
 
 // Official 7 Fleet Vehicles
 const OFFICIAL_VEHICLES = [
@@ -99,7 +121,7 @@ const OFFICIAL_VEHICLES = [
   {
     id: 'minibus',
     name: 'Mini Bus (25 Seater)',
-    category: 'Tempo Travellers',
+    category: 'Mini Bus',
     seats: 25,
     ac: true,
     rate_per_day: 8500,
@@ -110,195 +132,30 @@ const OFFICIAL_VEHICLES = [
     reg_number: 'KA51MB6789',
     features: ['25 Deluxe Pushback Seats', 'Air Suspension Ride', 'PA Mic & Audio System'],
     status: 'AVAILABLE'
+  },
+  {
+    id: 'bus',
+    name: 'Luxury Tourist Coach Bus (45 Seater)',
+    category: 'Bus',
+    seats: 45,
+    ac: true,
+    rate_per_day: 12000,
+    rate_per_km: 42,
+    min_km_per_day: 400,
+    driver_allowance_per_day: 1000,
+    image: '/bus.jpg',
+    reg_number: 'KA53CB9988',
+    features: ['45 Luxury Reclining Coach Seats', 'Chilled AC & Air Suspension', 'Large Luggage Bay', 'PA Microphone & Stereo'],
+    status: 'AVAILABLE'
   }
 ];
 
-// Seed Admin Profile & Default Verified Chauffeur
-const INITIAL_USERS = [
-  {
-    id: '00000000-0000-0000-0000-000000000001',
-    email: 'admin@sjttravels.com',
-    password: 'admin123',
-    name: 'SJT Chief Administrator',
-    phone: '+91 93534 62672',
-    role: 'ADMIN',
-    assigned_vehicle: null,
-    duty_mode: 'OFF_DUTY',
-    status: 'ACTIVE',
-    created_at: new Date().toISOString()
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000002',
-    email: 'ramesh.kumar@sjttravels.com',
-    password: 'driverpassword123',
-    name: 'Ramesh Kumar',
-    phone: '+91 98765 43210',
-    role: 'DRIVER',
-    assigned_vehicle: 'KA 05 AB 1234',
-    duty_mode: 'REGULAR',
-    status: 'ACTIVE',
-    created_at: new Date().toISOString()
-  }
-];
+// Development-only bootstrap administrator. Production requires an explicit administrator provisioned in PostgreSQL.
+const INITIAL_USERS = [];
 
-const INITIAL_TRANSACTIONS = [
-  {
-    id: 'tx-001',
-    type: 'PAY_IN',
-    category: 'CUSTOMER_BOOKING_ADVANCE',
-    title: 'Customer Advance Payment (Tempo Traveller)',
-    amount: 5500,
-    payment_mode: 'UPI',
-    reference_no: 'UPI-263526-98124',
-    party_name: 'Aravind K',
-    party_type: 'CUSTOMER',
-    related_booking_code: 'SJTR263526',
-    related_invoice_no: 'SJT-INV-2026-4011',
-    related_duty_code: null,
-    date: '2026-10-25',
-    time: '10:30 AM',
-    status: 'COMPLETED',
-    notes: 'Online booking via Customer App - Bengaluru to Mysuru trip',
-    created_at: new Date('2026-10-25T10:30:00Z').toISOString()
-  },
-  {
-    id: 'tx-002',
-    type: 'PAY_IN',
-    category: 'CORPORATE_MONTHLY_CONTRACT',
-    title: 'TCS Monthly IT Park Staff Shuttle Retainer',
-    amount: 85000,
-    payment_mode: 'NET_BANKING',
-    reference_no: 'NEFT-TCS-BLR-89210',
-    party_name: 'Tata Consultancy Services Ltd.',
-    party_type: 'CORPORATE',
-    related_booking_code: null,
-    related_invoice_no: 'SJT-INV-2026-1088',
-    related_duty_code: 'DUTY-KA05-882',
-    date: '2026-10-24',
-    time: '04:15 PM',
-    status: 'COMPLETED',
-    notes: 'Monthly corporate transport billing for October 2026',
-    created_at: new Date('2026-10-24T16:15:00Z').toISOString()
-  },
-  {
-    id: 'tx-003',
-    type: 'PAY_OUT',
-    category: 'DRIVER_DUTY_SETTLEMENT',
-    title: 'Driver Daily Duty Earnings - Ramesh Kumar',
-    amount: 4500,
-    payment_mode: 'UPI',
-    reference_no: 'IMPS-DRV-RAMESH-7712',
-    party_name: 'Ramesh Kumar',
-    party_type: 'DRIVER',
-    related_booking_code: 'SJTR263526',
-    related_invoice_no: null,
-    related_duty_code: 'DUTY-KA05-882',
-    date: '2026-10-25',
-    time: '05:30 PM',
-    status: 'COMPLETED',
-    notes: 'Settlement for Outstation trip and company duty (KA 05 AB 1234)',
-    created_at: new Date('2026-10-25T17:30:00Z').toISOString()
-  },
-  {
-    id: 'tx-004',
-    type: 'PAY_OUT',
-    category: 'FUEL_DIESEL',
-    title: 'Bharat Petroleum - Diesel Refuel (KA 05 AB 1234)',
-    amount: 3200,
-    payment_mode: 'UPI',
-    reference_no: 'BPCL-POS-55412',
-    party_name: 'Bharat Petroleum Silk Board',
-    party_type: 'VENDOR',
-    related_booking_code: null,
-    related_invoice_no: null,
-    related_duty_code: null,
-    date: '2026-10-25',
-    time: '08:15 AM',
-    status: 'COMPLETED',
-    notes: 'Fleet refuel: 35.8 Litres Diesel @ ₹89.4/L for Mysuru trip',
-    created_at: new Date('2026-10-25T08:15:00Z').toISOString()
-  },
-  {
-    id: 'tx-005',
-    type: 'PAY_OUT',
-    category: 'FASTAG_TOLL_PARKING',
-    title: 'Bengaluru-Mysuru Expressway FASTag Toll Recharge',
-    amount: 750,
-    payment_mode: 'NET_BANKING',
-    reference_no: 'NETC-FASTAG-99120',
-    party_name: 'NHAI FASTag Karnataka',
-    party_type: 'VENDOR',
-    related_booking_code: 'SJTR263526',
-    related_invoice_no: null,
-    related_duty_code: null,
-    date: '2026-10-25',
-    time: '07:45 AM',
-    status: 'COMPLETED',
-    notes: 'Expressway toll deduction and airport parking pool',
-    created_at: new Date('2026-10-25T07:45:00Z').toISOString()
-  },
-  {
-    id: 'tx-006',
-    type: 'PAY_OUT',
-    category: 'VEHICLE_MAINTENANCE',
-    title: 'Force Motors Authorised Service - 20,000 KM Inspection',
-    amount: 6800,
-    payment_mode: 'NET_BANKING',
-    reference_no: 'INV-FMS-90112',
-    party_name: 'Force Commercial Service Center, Peenya',
-    party_type: 'VENDOR',
-    related_booking_code: null,
-    related_invoice_no: null,
-    related_duty_code: null,
-    date: '2026-10-22',
-    time: '11:00 AM',
-    status: 'COMPLETED',
-    notes: 'Brake pads replacement, engine oil synthetic 15W40, alignment',
-    created_at: new Date('2026-10-22T11:00:00Z').toISOString()
-  }
-];
-
-const INITIAL_INVOICES = [
-  {
-    id: 'inv-001',
-    invoice_number: 'SJT-INV-2026-1088',
-    client_name: 'Tata Consultancy Services Ltd.',
-    client_type: 'CORPORATE',
-    client_gstin: '29AAACT2727Q1ZW',
-    billing_period: 'Oct 2026',
-    total_trips: 18,
-    total_km: 2450,
-    subtotal: 80952,
-    cgst: 2024,
-    sgst: 2024,
-    grand_total: 85000,
-    status: 'PAID',
-    payment_method: 'NEFT / RTGS',
-    notes: 'Electronic City campus employee shuttle service',
-    created_at: new Date('2026-10-24T12:00:00Z').toISOString()
-  },
-  {
-    id: 'inv-002',
-    invoice_number: 'SJT-INV-2026-4011',
-    client_name: 'Aravind K',
-    client_type: 'CUSTOMER',
-    client_gstin: 'URP (Unregistered Person)',
-    billing_period: '25 Oct 2026',
-    total_trips: 1,
-    total_km: 146,
-    subtotal: 5238,
-    cgst: 131,
-    sgst: 131,
-    grand_total: 5500,
-    status: 'PAID',
-    payment_method: 'UPI Razorpay',
-    notes: 'Bengaluru to Mysuru - Tempo Traveller 17 Seater (Booking #SJTR263526)',
-    created_at: new Date('2026-10-25T10:30:00Z').toISOString()
-  }
-];
 
 // Persistent Local Backup Store (ensures zero data loss during cloud maintenance/downtime)
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.SJT_DATA_DIR || path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
 
 if (!fs.existsSync(DATA_DIR)) {
@@ -307,33 +164,34 @@ if (!fs.existsSync(DATA_DIR)) {
 
 let localStore = {
   vehicles: [...OFFICIAL_VEHICLES],
-  users: [...INITIAL_USERS],
+  users: process.env.NODE_ENV === 'production' ? [] : [...INITIAL_USERS],
+  auth_sessions: [],
   driver_kyc: [],
+  driver_kyc_audit: [],
   bookings: [],
+  booking_payments: [],
   company_duties: [],
-  invoices: [...INITIAL_INVOICES],
-  transactions: [...INITIAL_TRANSACTIONS]
+  invoices: [],
+  transactions: []
 };
 
 function loadStore() {
   try {
+    if (process.env.NODE_ENV === 'production') return;
     if (fs.existsSync(STORE_FILE)) {
       const data = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
       localStore = {
         vehicles: data.vehicles?.length ? data.vehicles : [...OFFICIAL_VEHICLES],
-        users: data.users?.length ? data.users : [...INITIAL_USERS],
+        users: (data.users || []).filter(u => u.id !== '00000000-0000-0000-0000-000000000001' && u.email !== 'ramesh.kumar@sjttravels.com'),
+        auth_sessions: data.auth_sessions || [],
         driver_kyc: data.driver_kyc || [],
+        driver_kyc_audit: data.driver_kyc_audit || [],
         bookings: data.bookings || [],
+        booking_payments: data.booking_payments || [],
         company_duties: data.company_duties || [],
-        invoices: data.invoices?.length ? data.invoices : [...INITIAL_INVOICES],
-        transactions: data.transactions?.length ? data.transactions : [...INITIAL_TRANSACTIONS]
+        invoices: (data.invoices || []).filter(item => !['inv-001', 'inv-002'].includes(item.id)),
+        transactions: (data.transactions || []).filter(item => !['tx-001', 'tx-002', 'tx-003', 'tx-004', 'tx-005', 'tx-006'].includes(item.id))
       };
-      if (!localStore.users.find(u => u.email === 'admin@sjttravels.com')) {
-        localStore.users.push(INITIAL_USERS[0]);
-      }
-      if (!localStore.users.find(u => u.email === 'ramesh.kumar@sjttravels.com')) {
-        localStore.users.push(INITIAL_USERS[1]);
-      }
     } else {
       saveStore();
     }
@@ -343,6 +201,7 @@ function loadStore() {
 }
 
 function saveStore() {
+  if (process.env.NODE_ENV === 'production') return;
   try {
     fs.writeFileSync(STORE_FILE, JSON.stringify(localStore, null, 2), 'utf8');
   } catch (err) {
@@ -357,6 +216,7 @@ let currentDatabaseUrl = process.env.DATABASE_URL || '';
 let pool = null;
 let isConnected = false;
 let lastPingLatency = 0;
+let initializationPromise = null;
 let connectionInfo = {
   host: 'Not Connected',
   database: 'None',
@@ -427,7 +287,7 @@ function initPool(connString) {
     isConnected = false;
   });
 
-  verifyAndMigrateSchema();
+  initializationPromise = verifyAndMigrateSchema();
 }
 
 async function verifyAndMigrateSchema() {
@@ -452,10 +312,23 @@ async function verifyAndMigrateSchema() {
         permissions TEXT[] DEFAULT '{"bookings","cancellations","drivers","duties","attendance","payroll","fleet"}',
         assigned_vehicle TEXT,
         duty_mode TEXT DEFAULT 'OFF_DUTY',
+        is_online BOOLEAN NOT NULL DEFAULT FALSE,
+        service_area TEXT,
         status TEXT DEFAULT 'ACTIVE',
         salary NUMERIC DEFAULT 25000,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS service_area TEXT;
+
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        session_id UUID PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
 
       CREATE TABLE IF NOT EXISTS vehicles (
         id TEXT PRIMARY KEY,
@@ -483,6 +356,7 @@ async function verifyAndMigrateSchema() {
         license_number TEXT NOT NULL,
         badge_number TEXT,
         aadhar_number TEXT NOT NULL,
+        pan_number TEXT,
         vehicle_preference TEXT NOT NULL,
         experience_years INTEGER DEFAULT 3,
         license_doc_url TEXT,
@@ -493,18 +367,45 @@ async function verifyAndMigrateSchema() {
         police_verification_url TEXT,
         medical_fitness_doc_url TEXT,
         live_face_photo_url TEXT,
-        face_match_score NUMERIC DEFAULT 98.4,
-        face_verified BOOLEAN DEFAULT TRUE,
-        govt_verified BOOLEAN DEFAULT TRUE,
-        rto_dl_status TEXT DEFAULT 'SARATHI_GOVT_VERIFIED',
-        uidai_aadhar_status TEXT DEFAULT 'UIDAI_GOVT_VERIFIED',
-        police_clearance_status TEXT DEFAULT 'POLICE_CLEARED',
+        face_match_score NUMERIC,
+        face_verified BOOLEAN DEFAULT FALSE,
+        govt_verified BOOLEAN DEFAULT FALSE,
+        rto_dl_status TEXT DEFAULT 'NOT_VERIFIED',
+        uidai_aadhar_status TEXT DEFAULT 'NOT_VERIFIED',
+        police_clearance_status TEXT DEFAULT 'NOT_VERIFIED',
         kyc_status TEXT DEFAULT 'PENDING' CHECK (kyc_status IN ('PENDING', 'APPROVED', 'REJECTED')),
         rejection_reason TEXT,
+        address TEXT,
+        vehicle_reg TEXT,
+        vehicle_type TEXT,
+        vehicle_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        documents JSONB NOT NULL DEFAULT '{}'::jsonb,
+        face_document JSONB,
+        reviewed_by TEXT,
         assigned_vehicle_reg TEXT,
         submitted_at TIMESTAMPTZ DEFAULT NOW(),
         verified_at TIMESTAMPTZ
       );
+
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS address TEXT;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS pan_number TEXT;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS vehicle_reg TEXT;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS vehicle_type TEXT;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS vehicle_details JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS documents JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS face_document JSONB;
+      ALTER TABLE driver_kyc ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
+
+      CREATE TABLE IF NOT EXISTS driver_kyc_audit (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        kyc_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        actor_email TEXT NOT NULL,
+        action TEXT NOT NULL,
+        document_key TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_driver_kyc_audit_kyc ON driver_kyc_audit(kyc_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS bookings (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -534,6 +435,19 @@ async function verifyAndMigrateSchema() {
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+      CREATE TABLE IF NOT EXISTS booking_payments (
+        id UUID PRIMARY KEY,
+        booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+        booking_code TEXT NOT NULL,
+        driver_id TEXT NOT NULL,
+        driver_name TEXT NOT NULL,
+        amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+        payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'UPI')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
 
       CREATE TABLE IF NOT EXISTS company_duties (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -542,6 +456,9 @@ async function verifyAndMigrateSchema() {
         driver_name TEXT NOT NULL,
         company_name TEXT NOT NULL,
         external_trip_id TEXT NOT NULL,
+        pickup_location TEXT,
+        destination_location TEXT,
+        route_details TEXT,
         vehicle_reg TEXT NOT NULL,
         login_time TEXT NOT NULL,
         logout_time TEXT,
@@ -551,13 +468,20 @@ async function verifyAndMigrateSchema() {
         toll_parking_allowance NUMERIC DEFAULT 0,
         food_allowance NUMERIC DEFAULT 0,
         duty_selfie_url TEXT,
-        duty_face_verified BOOLEAN DEFAULT TRUE,
-        duty_face_match_score NUMERIC DEFAULT 99.1,
+        duty_face_verified BOOLEAN DEFAULT FALSE,
+        duty_face_match_score NUMERIC,
         status TEXT DEFAULT 'ON_DUTY' CHECK (status IN ('ON_DUTY', 'SUBMITTED', 'VERIFIED_BY_ADMIN', 'REJECTED')),
         duty_date TEXT NOT NULL,
         admin_note TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE company_duties ALTER COLUMN duty_face_verified SET DEFAULT FALSE;
+      ALTER TABLE company_duties ALTER COLUMN duty_face_match_score DROP DEFAULT;
+      ALTER TABLE company_duties ADD COLUMN IF NOT EXISTS pickup_location TEXT;
+      ALTER TABLE company_duties ADD COLUMN IF NOT EXISTS destination_location TEXT;
+      ALTER TABLE company_duties ADD COLUMN IF NOT EXISTS route_details TEXT;
+      ALTER TABLE company_duties ADD COLUMN IF NOT EXISTS shift_name TEXT;
 
       CREATE TABLE IF NOT EXISTS invoices (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -600,54 +524,75 @@ async function verifyAndMigrateSchema() {
       ALTER TABLE company_duties ALTER COLUMN driver_id TYPE TEXT;
       ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check;
       ALTER TABLE company_duties DROP CONSTRAINT IF EXISTS company_duties_status_check;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS return_date TEXT;
 
       -- Fast Lookup Indexes
       CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
       CREATE INDEX IF NOT EXISTS idx_bookings_code ON bookings(booking_code);
       CREATE INDEX IF NOT EXISTS idx_bookings_cust_email ON bookings(customer_email);
+      CREATE INDEX IF NOT EXISTS idx_booking_payments_booking ON booking_payments(booking_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_company_duties_code ON company_duties(duty_code);
       CREATE INDEX IF NOT EXISTS idx_company_duties_driver ON company_duties(driver_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_company_duties_one_active_per_driver
+        ON company_duties(driver_id) WHERE status = 'ON_DUTY' AND driver_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_transactions_type ON company_transactions(type);
       CREATE INDEX IF NOT EXISTS idx_transactions_date ON company_transactions(date);
     `);
 
-    // 2. Seed Official Fleet Vehicles
-    const vehCountRes = await client.query('SELECT COUNT(*) FROM vehicles');
-    if (parseInt(vehCountRes.rows[0].count, 10) === 0) {
-      console.log('>>> [POSTGRES]: Seeding 7 official vehicles into PostgreSQL table... <<<');
-      for (const v of OFFICIAL_VEHICLES) {
-        await client.query(`
-          INSERT INTO vehicles (id, name, category, seats, ac, rate_per_day, rate_per_km, min_km_per_day, driver_allowance_per_day, image, reg_number, features, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, rate_per_day = EXCLUDED.rate_per_day, rate_per_km = EXCLUDED.rate_per_km
-        `, [v.id, v.name, v.category, v.seats, v.ac, v.rate_per_day, v.rate_per_km, v.min_km_per_day, v.driver_allowance_per_day, v.image, v.reg_number, v.features, v.status]);
-      }
+    // 2. Seed & Sync Official Fleet Vehicles (ensures all 8 vehicles with current rates & images)
+    for (const v of OFFICIAL_VEHICLES) {
+      await client.query(`
+        INSERT INTO vehicles (id, name, category, seats, ac, rate_per_day, rate_per_km, min_km_per_day, driver_allowance_per_day, image, reg_number, features, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (id) DO UPDATE SET 
+          name = EXCLUDED.name, 
+          category = EXCLUDED.category,
+          seats = EXCLUDED.seats,
+          rate_per_day = EXCLUDED.rate_per_day, 
+          rate_per_km = EXCLUDED.rate_per_km,
+          min_km_per_day = EXCLUDED.min_km_per_day,
+          driver_allowance_per_day = EXCLUDED.driver_allowance_per_day,
+          image = EXCLUDED.image,
+          reg_number = EXCLUDED.reg_number,
+          features = EXCLUDED.features,
+          status = EXCLUDED.status
+      `, [v.id, v.name, v.category, v.seats, v.ac, v.rate_per_day, v.rate_per_km, v.min_km_per_day, v.driver_allowance_per_day, v.image, v.reg_number, v.features, v.status]).catch(e => console.error('Vehicle sync error:', e.message));
     }
 
-    // 3. Seed Admin User
-    const adminRes = await client.query('SELECT id FROM users WHERE email = $1', ['admin@sjttravels.com']);
-    if (adminRes.rows.length === 0) {
-      console.log('>>> [POSTGRES]: Initializing Chief Administrator in PostgreSQL... <<<');
-      const admin = INITIAL_USERS[0];
+    // Never install known default credentials in production.
+    const adminRes = await client.query("SELECT id FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' LIMIT 1");
+    const bootstrapEmail = String(process.env.SJT_BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase();
+    const bootstrapPassword = String(process.env.SJT_BOOTSTRAP_ADMIN_PASSWORD || '');
+    if (adminRes.rows.length === 0 && bootstrapEmail && bootstrapPassword) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bootstrapEmail) || bootstrapPassword.length < 12 || bootstrapPassword.length > 128) {
+        throw new Error('SJT_BOOTSTRAP_ADMIN_EMAIL must be valid and SJT_BOOTSTRAP_ADMIN_PASSWORD must be 12-128 characters.');
+      }
+      const storedPassword = await hashPassword(bootstrapPassword);
       await client.query(`
         INSERT INTO users (id, email, password, name, phone, role, status)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (email) DO NOTHING
-      `, [admin.id, admin.email, admin.password, admin.name, admin.phone, admin.role, admin.status]);
+      `, [crypto.randomUUID(), bootstrapEmail, storedPassword, String(process.env.SJT_BOOTSTRAP_ADMIN_NAME || 'SJT Administrator').trim().slice(0, 160), String(process.env.SJT_BOOTSTRAP_ADMIN_PHONE || 'Not provided').trim().slice(0, 40), 'ADMIN', 'ACTIVE']);
+      console.log('>>> [POSTGRES]: Bootstrap administrator provisioned from deployment environment. <<<');
+    } else if (adminRes.rows.length === 0 && process.env.NODE_ENV === 'production') {
+      throw new Error('No administrator exists. Set SJT_BOOTSTRAP_ADMIN_EMAIL and SJT_BOOTSTRAP_ADMIN_PASSWORD once to provision the first admin.');
     }
+    const verifiedAdmin = await client.query("SELECT id FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' LIMIT 1");
+    if (verifiedAdmin.rows.length === 0) throw new Error('Administrator bootstrap did not create an active admin account. Check the configured bootstrap email.');
 
-    // 4. Sync any registered users/bookings/duties from local store to ensure zero loss
-    for (const u of localStore.users) {
+    // Only development may sync its local demo fixtures into PostgreSQL.
+    if (process.env.NODE_ENV !== 'production') for (const u of localStore.users) {
       if (u.email !== 'admin@sjttravels.com') {
+        const storedPassword = isPasswordHash(u.password) ? u.password : await hashPassword(u.password || crypto.randomBytes(32).toString('hex'));
         await client.query(`
           INSERT INTO users (id, email, password, name, phone, role, assigned_vehicle, duty_mode, status)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           ON CONFLICT (email) DO NOTHING
-        `, [u.id || crypto.randomUUID(), u.email, u.password, u.name, u.phone, u.role || 'CUSTOMER', u.assigned_vehicle || null, u.duty_mode || 'OFF_DUTY', u.status || 'ACTIVE']).catch(() => {});
+        `, [u.id || crypto.randomUUID(), u.email, storedPassword, u.name, u.phone, u.role || 'CUSTOMER', u.assigned_vehicle || null, u.duty_mode || 'OFF_DUTY', u.status || 'ACTIVE']).catch(() => {});
       }
     }
 
-    for (const b of localStore.bookings) {
+    if (process.env.NODE_ENV !== 'production') for (const b of localStore.bookings) {
       await client.query(`
         INSERT INTO bookings (
           id, booking_code, customer_name, customer_phone, customer_email, trip_type,
@@ -668,7 +613,7 @@ async function verifyAndMigrateSchema() {
     }
 
     client.release();
-    console.log('>>> [POSTGRES READY]: All 6 tables verified & live on PostgreSQL! <<<');
+    console.log('>>> [POSTGRES READY]: Required tables verified & live on PostgreSQL! <<<');
     return true;
   } catch (err) {
     isConnected = false;
@@ -678,7 +623,7 @@ async function verifyAndMigrateSchema() {
 }
 
 // Background auto-reconnect and health check heartbeat (every 15 seconds)
-setInterval(async () => {
+const healthTimer = setInterval(async () => {
   if (pool) {
     const start = Date.now();
     try {
@@ -695,6 +640,7 @@ setInterval(async () => {
     }
   }
 }, 15000);
+healthTimer.unref();
 
 // Initialize on startup
 initPool(currentDatabaseUrl);
@@ -705,7 +651,7 @@ module.exports = {
     if (!pool) {
       initPool(currentDatabaseUrl);
     }
-    const success = await verifyAndMigrateSchema();
+    const success = initializationPromise ? await initializationPromise : await verifyAndMigrateSchema();
     if (!success && !isConnected) {
       throw new Error(`Database connection failed (${connectionInfo.provider}). Please verify host and credentials.`);
     }
@@ -717,8 +663,72 @@ module.exports = {
   },
 
   getPool: () => pool,
+  async close() {
+    clearInterval(healthTimer);
+    if (pool) await pool.end();
+    pool = null;
+    isConnected = false;
+  },
   isRemoteActive: () => isConnected,
+  async createAuthSession({ sessionId, userId, expiresAt }) {
+    if (isConnected && pool) {
+      await pool.query('DELETE FROM auth_sessions WHERE expires_at < NOW()');
+      await pool.query(
+        'INSERT INTO auth_sessions (session_id, user_id, expires_at) VALUES ($1, $2, $3)',
+        [sessionId, userId, expiresAt]
+      );
+      return;
+    }
+    localStore.auth_sessions = localStore.auth_sessions.filter(session => new Date(session.expires_at).getTime() > Date.now());
+    localStore.auth_sessions.push({ session_id: sessionId, user_id: String(userId), expires_at: expiresAt });
+    saveStore();
+  },
+  async isAuthSessionActive(sessionId, userId) {
+    if (isConnected && pool) {
+      const result = await pool.query(
+        'SELECT 1 FROM auth_sessions WHERE session_id = $1 AND user_id::text = $2 AND expires_at > NOW()',
+        [sessionId, String(userId)]
+      );
+      return result.rowCount > 0;
+    }
+    return localStore.auth_sessions.some(session =>
+      session.session_id === sessionId &&
+      String(session.user_id) === String(userId) &&
+      new Date(session.expires_at).getTime() > Date.now()
+    );
+  },
+  async revokeAuthSession(sessionId, userId) {
+    if (isConnected && pool) {
+      const result = await pool.query(
+        'DELETE FROM auth_sessions WHERE session_id = $1 AND user_id::text = $2',
+        [sessionId, String(userId)]
+      );
+      return result.rowCount > 0;
+    }
+    const previousLength = localStore.auth_sessions.length;
+    localStore.auth_sessions = localStore.auth_sessions.filter(session =>
+      session.session_id !== sessionId || String(session.user_id) !== String(userId)
+    );
+    if (localStore.auth_sessions.length !== previousLength) saveStore();
+    return localStore.auth_sessions.length !== previousLength;
+  },
   getDatabaseUrl: () => currentDatabaseUrl,
+  verifyPassword,
+  async setUserPassword(id, password) {
+    const hashed = await hashPassword(password);
+    await this.updateUser(id, { password: hashed });
+    return true;
+  },
+  async recordKycAudit({ kyc_id, actor_id, actor_email, action, document_key }) {
+    const entry = { id: crypto.randomUUID(), kyc_id: String(kyc_id), actor_id: String(actor_id), actor_email, action, document_key: document_key || null, created_at: new Date().toISOString() };
+    if (isConnected && pool) {
+      await pool.query('INSERT INTO driver_kyc_audit (id, kyc_id, actor_id, actor_email, action, document_key, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [entry.id, entry.kyc_id, entry.actor_id, entry.actor_email, entry.action, entry.document_key, entry.created_at]);
+    } else {
+      localStore.driver_kyc_audit.unshift(entry);
+      saveStore();
+    }
+    return entry;
+  },
   getConnectionInfo: () => ({
     ...connectionInfo,
     isConnected,
@@ -847,10 +857,8 @@ module.exports = {
     if (!email) return null;
     const cleanEmail = email.toLowerCase().trim();
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
-        if (res.rows.length > 0) return res.rows[0];
-      } catch (e) {}
+      const res = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+      return res.rows[0] || null;
     }
     return localStore.users.find(u => u.email.toLowerCase() === cleanEmail) || null;
   },
@@ -858,74 +866,68 @@ module.exports = {
   async getUserById(id) {
     if (!id) return null;
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT * FROM users WHERE id::text = $1', [String(id)]);
-        if (res.rows.length > 0) return res.rows[0];
-      } catch (e) {}
+      const res = await pool.query('SELECT * FROM users WHERE id::text = $1', [String(id)]);
+      return res.rows[0] || null;
     }
     return localStore.users.find(u => String(u.id) === String(id)) || null;
   },
 
   async createUser(userData) {
+    const storedPassword = isPasswordHash(userData.password) ? userData.password : await hashPassword(userData.password);
     const newUser = {
       id: userData.id || crypto.randomUUID(),
       email: userData.email.toLowerCase().trim(),
-      password: userData.password,
+      password: storedPassword,
       name: userData.name,
       phone: userData.phone,
       role: userData.role || 'CUSTOMER',
       assigned_vehicle: userData.assigned_vehicle || null,
       duty_mode: 'OFF_DUTY',
+      is_online: false,
+      service_area: null,
       status: 'ACTIVE',
       created_at: new Date().toISOString()
     };
 
+    if (isConnected && pool) {
+      await pool.query(`
+        INSERT INTO users (id, email, password, name, phone, role, assigned_vehicle, duty_mode, is_online, service_area, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `, [newUser.id, newUser.email, newUser.password, newUser.name, newUser.phone, newUser.role, newUser.assigned_vehicle, newUser.duty_mode, newUser.is_online, newUser.service_area, newUser.status]);
+      return newUser;
+    }
     localStore.users.push(newUser);
     saveStore();
-
-    if (isConnected && pool) {
-      try {
-        await pool.query(`
-          INSERT INTO users (id, email, password, name, phone, role, assigned_vehicle, duty_mode, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        `, [newUser.id, newUser.email, newUser.password, newUser.name, newUser.phone, newUser.role, newUser.assigned_vehicle, newUser.duty_mode, newUser.status]);
-      } catch (e) {
-        console.error('PostgreSQL user insert err:', e.message);
-      }
-    }
     return newUser;
   },
 
   async updateUser(id, updates) {
     const uIdx = localStore.users.findIndex(u => String(u.id) === String(id));
+    if (isConnected && pool) {
+      const fields = [];
+      const values = [];
+      let i = 1;
+      for (const [k, v] of Object.entries(updates)) {
+        if (!/^[a-z_]+$/.test(k)) throw new Error('Invalid user update field.');
+        fields.push(`${k} = $${i++}`);
+        values.push(v);
+      }
+      if (!fields.length) return await this.getUserById(id);
+      values.push(String(id));
+      const result = await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id::text = $${i} RETURNING *`, values);
+      return result.rows[0] || null;
+    }
     if (uIdx !== -1) {
       localStore.users[uIdx] = { ...localStore.users[uIdx], ...updates };
       saveStore();
-    }
-    if (isConnected && pool) {
-      try {
-        const fields = [];
-        const values = [];
-        let i = 1;
-        for (const [k, v] of Object.entries(updates)) {
-          fields.push(`${k} = $${i++}`);
-          values.push(v);
-        }
-        values.push(String(id));
-        await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id::text = $${i}`, values);
-      } catch (e) {
-        console.error('PostgreSQL user update err:', e.message);
-      }
     }
     return uIdx !== -1 ? localStore.users[uIdx] : null;
   },
 
   async getAllUsers() {
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT id, email, name, phone, role, assigned_vehicle, duty_mode, status, created_at FROM users');
-        if (res.rows && res.rows.length > 0) return res.rows;
-      } catch (e) {}
+      const res = await pool.query('SELECT id, email, name, phone, role, assigned_vehicle, duty_mode, status, created_at FROM users');
+      return res.rows;
     }
     return localStore.users.map(({ password, ...rest }) => rest);
   },
@@ -933,36 +935,33 @@ module.exports = {
   // --- STAFF & EMPLOYEES ---
   async getEmployees() {
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT * FROM users WHERE role = $1', ['EMPLOYEE']);
-        if (res.rows && res.rows.length > 0) {
-          return res.rows.map(({ password, ...rest }) => ({
-            ...rest,
-            designation: rest.designation || 'Operations Staff',
-            permissions: rest.permissions || ['bookings', 'cancellations', 'drivers', 'duties', 'attendance', 'payroll', 'fleet'],
-            salary: rest.salary || 25000
-          }));
-        }
-      } catch (e) {}
+      const res = await pool.query('SELECT * FROM users WHERE role = $1', ['EMPLOYEE']);
+      return res.rows.map(({ password, ...rest }) => ({
+        ...rest,
+        designation: rest.designation || 'Operations Staff',
+        permissions: rest.permissions || ['bookings', 'cancellations', 'drivers', 'duties', 'attendance', 'payroll', 'fleet', 'accounts'],
+        salary: rest.salary || 25000
+      }));
     }
     return localStore.users.filter(u => u.role === 'EMPLOYEE').map(({ password, ...rest }) => ({
       ...rest,
       designation: rest.designation || 'Operations Staff',
-      permissions: rest.permissions || ['bookings', 'cancellations', 'drivers', 'duties', 'attendance', 'payroll', 'fleet'],
+      permissions: rest.permissions || ['bookings', 'cancellations', 'drivers', 'duties', 'attendance', 'payroll', 'fleet', 'accounts'],
       salary: rest.salary || 25000
     }));
   },
 
   async createEmployee(empData) {
+    const storedPassword = isPasswordHash(empData.password) ? empData.password : await hashPassword(empData.password);
     const newEmp = {
       id: crypto.randomUUID(),
       email: empData.email.toLowerCase().trim(),
-      password: empData.password || 'sjt1234',
+      password: storedPassword,
       name: empData.name,
       phone: empData.phone || '+91 98450 00000',
       role: 'EMPLOYEE',
       designation: empData.designation || 'Operations Staff',
-      permissions: Array.isArray(empData.permissions) ? empData.permissions : ['bookings', 'cancellations', 'drivers', 'duties', 'attendance', 'payroll', 'fleet'],
+      permissions: Array.isArray(empData.permissions) ? empData.permissions : ['bookings', 'cancellations', 'drivers', 'duties', 'attendance', 'payroll', 'fleet', 'accounts'],
       salary: Number(empData.salary) || 25000,
       assigned_vehicle: null,
       duty_mode: 'ACTIVE',
@@ -970,18 +969,14 @@ module.exports = {
       created_at: new Date().toISOString()
     };
 
-    localStore.users.push(newEmp);
-    saveStore();
-
     if (isConnected && pool) {
-      try {
-        await pool.query(`
+      await pool.query(`
           INSERT INTO users (id, email, password, name, phone, role, designation, permissions, salary, status)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         `, [newEmp.id, newEmp.email, newEmp.password, newEmp.name, newEmp.phone, newEmp.role, newEmp.designation, newEmp.permissions, newEmp.salary, newEmp.status]);
-      } catch (e) {
-        console.error('PostgreSQL employee insert err:', e.message);
-      }
+    } else {
+      localStore.users.push(newEmp);
+      saveStore();
     }
     const { password, ...safeEmp } = newEmp;
     return safeEmp;
@@ -1028,12 +1023,9 @@ module.exports = {
   async getDrivers() {
     let driverUsers = [];
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT * FROM users WHERE role = $1', ['DRIVER']);
-        if (res.rows) driverUsers = res.rows;
-      } catch (e) {}
-    }
-    if (!driverUsers.length) {
+      const res = await pool.query('SELECT * FROM users WHERE role = $1', ['DRIVER']);
+      driverUsers = res.rows;
+    } else {
       driverUsers = localStore.users.filter(u => u.role === 'DRIVER');
     }
 
@@ -1048,6 +1040,8 @@ module.exports = {
         phone: u.phone,
         email: u.email,
         driverMode: u.duty_mode || 'OFF_DUTY',
+        isOnline: Boolean(u.is_online),
+        serviceArea: u.service_area || '',
         status: u.status || 'AVAILABLE',
         assignedVehicleReg: u.assigned_vehicle || (kyc ? kyc.assigned_vehicle_reg : null) || 'Not Assigned',
         rating: 4.9,
@@ -1069,8 +1063,15 @@ module.exports = {
       license_number: kycData.license_number,
       badge_number: kycData.badge_number || 'PSV-KA-PENDING',
       aadhar_number: kycData.aadhar_number,
+      pan_number: kycData.pan_number || '',
       vehicle_preference: kycData.vehicle_preference || 'Sedans (Toyota Etios)',
       experience_years: parseInt(kycData.experience_years, 10) || 3,
+      address: kycData.address || '',
+      vehicle_reg: kycData.vehicle_reg || '',
+      vehicle_type: kycData.vehicle_type || kycData.vehicle_preference || '',
+      vehicle_details: kycData.vehicle_details || {},
+      documents: kycData.documents || {},
+      face_document: kycData.face_document || null,
       license_doc_url: kycData.license_doc_url || null,
       license_back_doc_url: kycData.license_back_doc_url || null,
       aadhar_doc_url: kycData.aadhar_doc_url || null,
@@ -1079,12 +1080,12 @@ module.exports = {
       police_verification_url: kycData.police_verification_url || null,
       medical_fitness_doc_url: kycData.medical_fitness_doc_url || null,
       live_face_photo_url: kycData.live_face_photo_url || null,
-      face_match_score: kycData.face_match_score || 98.4,
-      face_verified: kycData.face_verified !== false,
-      govt_verified: kycData.govt_verified !== false,
-      rto_dl_status: kycData.rto_dl_status || 'SARATHI_GOVT_VERIFIED',
-      uidai_aadhar_status: kycData.uidai_aadhar_status || 'UIDAI_GOVT_VERIFIED',
-      police_clearance_status: kycData.police_clearance_status || 'POLICE_CLEARED',
+      face_match_score: kycData.face_match_score || null,
+      face_verified: Boolean(kycData.face_verified),
+      govt_verified: Boolean(kycData.govt_verified),
+      rto_dl_status: kycData.rto_dl_status || 'NOT_VERIFIED',
+      uidai_aadhar_status: kycData.uidai_aadhar_status || 'NOT_VERIFIED',
+      police_clearance_status: kycData.police_clearance_status || 'NOT_VERIFIED',
       kyc_status: 'PENDING',
       rejection_reason: null,
       assigned_vehicle_reg: null,
@@ -1092,124 +1093,142 @@ module.exports = {
       verified_at: null
     };
 
+    if (isConnected && pool) {
+      const jsonColumns = ['vehicle_details', 'documents', 'face_document'];
+      const columns = ['driver_name', 'driver_phone', 'driver_email', 'license_number', 'badge_number', 'aadhar_number', 'pan_number', 'vehicle_preference', 'experience_years', 'address', 'vehicle_reg', 'vehicle_type', 'vehicle_details', 'documents', 'face_document', 'license_doc_url', 'license_back_doc_url', 'aadhar_doc_url', 'aadhar_back_doc_url', 'psv_badge_doc_url', 'police_verification_url', 'medical_fitness_doc_url', 'live_face_photo_url', 'face_match_score', 'face_verified', 'govt_verified', 'rto_dl_status', 'uidai_aadhar_status', 'police_clearance_status', 'kyc_status', 'rejection_reason', 'assigned_vehicle_reg', 'reviewed_by', 'submitted_at', 'verified_at'];
+      const values = columns.map(column => jsonColumns.includes(column) ? JSON.stringify(newKyc[column]) : newKyc[column]);
+      const existing = await pool.query('SELECT id FROM driver_kyc WHERE driver_id::text = $1 ORDER BY submitted_at DESC LIMIT 1', [String(newKyc.driver_id)]);
+      if (existing.rows[0]) {
+        newKyc.id = existing.rows[0].id;
+        const assignments = columns.map((column, index) => `${column} = $${index + 1}${jsonColumns.includes(column) ? '::jsonb' : ''}`).join(', ');
+        const result = await pool.query(`UPDATE driver_kyc SET ${assignments} WHERE id::text = $${columns.length + 1} RETURNING *`, [...values, String(newKyc.id)]);
+        return result.rows[0] || newKyc;
+      }
+      const result = await pool.query(`INSERT INTO driver_kyc (id, driver_id, ${columns.join(', ')}) VALUES ($1, $2, ${columns.map((column, index) => `$${index + 3}${jsonColumns.includes(column) ? '::jsonb' : ''}`).join(', ')}) RETURNING *`, [newKyc.id, newKyc.driver_id, ...values]);
+      return result.rows[0] || newKyc;
+    }
     const existingIdx = localStore.driver_kyc.findIndex(k => String(k.driver_id) === String(newKyc.driver_id) || k.driver_email === newKyc.driver_email);
     if (existingIdx !== -1) {
       localStore.driver_kyc[existingIdx] = { ...localStore.driver_kyc[existingIdx], ...newKyc, id: localStore.driver_kyc[existingIdx].id };
-    } else {
-      localStore.driver_kyc.push(newKyc);
+      saveStore();
+      return localStore.driver_kyc[existingIdx];
     }
+    localStore.driver_kyc.push(newKyc);
     saveStore();
-
-    if (isConnected && pool) {
-      try {
-        await pool.query(`
-          INSERT INTO driver_kyc (
-            id, driver_id, driver_name, driver_phone, driver_email, license_number, badge_number,
-            aadhar_number, vehicle_preference, experience_years, license_doc_url, license_back_doc_url,
-            aadhar_doc_url, aadhar_back_doc_url, psv_badge_doc_url, police_verification_url,
-            medical_fitness_doc_url, live_face_photo_url, face_match_score, face_verified,
-            govt_verified, rto_dl_status, uidai_aadhar_status, police_clearance_status, kyc_status
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
-          )
-        `, [
-          newKyc.id, newKyc.driver_id, newKyc.driver_name, newKyc.driver_phone, newKyc.driver_email,
-          newKyc.license_number, newKyc.badge_number, newKyc.aadhar_number, newKyc.vehicle_preference,
-          newKyc.experience_years, newKyc.license_doc_url, newKyc.license_back_doc_url, newKyc.aadhar_doc_url,
-          newKyc.aadhar_back_doc_url, newKyc.psv_badge_doc_url, newKyc.police_verification_url,
-          newKyc.medical_fitness_doc_url, newKyc.live_face_photo_url, newKyc.face_match_score,
-          newKyc.face_verified, newKyc.govt_verified, newKyc.rto_dl_status, newKyc.uidai_aadhar_status,
-          newKyc.police_clearance_status, newKyc.kyc_status
-        ]);
-      } catch (e) {
-        console.error('PostgreSQL KYC insert err:', e.message);
-      }
-    }
     return newKyc;
   },
 
   async getKycByDriverId(driverId) {
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT * FROM driver_kyc WHERE driver_id::text = $1', [String(driverId)]);
-        if (res.rows.length > 0) return res.rows[0];
-      } catch (e) {}
+      const res = await pool.query('SELECT * FROM driver_kyc WHERE driver_id::text = $1 ORDER BY submitted_at DESC LIMIT 1', [String(driverId)]);
+      return res.rows[0] || null;
     }
     return localStore.driver_kyc.find(k => String(k.driver_id) === String(driverId)) || null;
   },
 
   async getAllKycRequests() {
     if (isConnected && pool) {
-      try {
-        const res = await pool.query('SELECT * FROM driver_kyc ORDER BY submitted_at DESC');
-        if (res.rows && res.rows.length > 0) return res.rows;
-      } catch (e) {}
+      const res = await pool.query('SELECT * FROM driver_kyc ORDER BY submitted_at DESC');
+      return res.rows;
     }
     return [...localStore.driver_kyc].sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at));
   },
 
-  async reviewKyc(kycId, { action, assigned_vehicle_reg, rejection_reason }) {
+  async reviewKyc(kycId, { action, assigned_vehicle_reg, rejection_reason, reviewed_by }) {
     const isApproved = action === 'APPROVE';
     const updates = {
       kyc_status: isApproved ? 'APPROVED' : 'REJECTED',
-      assigned_vehicle_reg: isApproved ? (assigned_vehicle_reg || 'KA01AE1234') : null,
+      assigned_vehicle_reg: isApproved ? assigned_vehicle_reg : null,
       rejection_reason: isApproved ? null : (rejection_reason || 'Document verification failed. Please re-upload clear copies.'),
+      reviewed_by,
       verified_at: new Date().toISOString()
     };
 
-    const kIndex = localStore.driver_kyc.findIndex(k => String(k.id) === String(kycId) || String(k.driver_id) === String(kycId));
-    let updatedKyc = null;
-    if (kIndex !== -1) {
-      localStore.driver_kyc[kIndex] = { ...localStore.driver_kyc[kIndex], ...updates };
-      updatedKyc = localStore.driver_kyc[kIndex];
-
-      const driverUser = localStore.users.find(u => String(u.id) === String(updatedKyc.driver_id));
-      if (driverUser && isApproved) {
-        driverUser.assigned_vehicle = updatedKyc.assigned_vehicle_reg;
-        driverUser.status = 'ACTIVE';
-      }
-      saveStore();
-    }
-
     if (isConnected && pool) {
+      const client = await pool.connect();
       try {
-        await pool.query(`
+        await client.query('BEGIN');
+        const result = await client.query(`
           UPDATE driver_kyc 
-          SET kyc_status = $1, assigned_vehicle_reg = $2, rejection_reason = $3, verified_at = $4
-          WHERE id::text = $5 OR driver_id::text = $5
-        `, [updates.kyc_status, updates.assigned_vehicle_reg, updates.rejection_reason, updates.verified_at, String(kycId)]);
-
+          SET kyc_status = $1, assigned_vehicle_reg = $2, rejection_reason = $3, verified_at = $4, reviewed_by = $5
+          WHERE id::text = $6 OR driver_id::text = $6
+          RETURNING *
+        `, [updates.kyc_status, updates.assigned_vehicle_reg, updates.rejection_reason, updates.verified_at, reviewed_by, String(kycId)]);
+        const updatedKyc = result.rows[0];
         if (updatedKyc && isApproved) {
-          await pool.query(`
+          await client.query(`
             UPDATE users SET assigned_vehicle = $1, status = 'ACTIVE' WHERE id::text = $2
           `, [updatedKyc.assigned_vehicle_reg, String(updatedKyc.driver_id)]);
         }
+        await client.query('COMMIT');
+        return updatedKyc || null;
       } catch (e) {
-        console.error('PostgreSQL KYC review err:', e.message);
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
       }
     }
+    const kIndex = localStore.driver_kyc.findIndex(k => String(k.id) === String(kycId) || String(k.driver_id) === String(kycId));
+    if (kIndex === -1) return null;
+    localStore.driver_kyc[kIndex] = { ...localStore.driver_kyc[kIndex], ...updates };
+    const updatedKyc = localStore.driver_kyc[kIndex];
+    const driverUser = localStore.users.find(u => String(u.id) === String(updatedKyc.driver_id));
+    if (driverUser && isApproved) {
+      driverUser.assigned_vehicle = updatedKyc.assigned_vehicle_reg;
+      driverUser.status = 'ACTIVE';
+    }
+    saveStore();
     return updatedKyc;
+  },
+
+  async reviewKycDocument(kycId, { document_key, action, rejection_reason, reviewed_by }) {
+    const record = await this.getKycById(kycId);
+    if (!record) return null;
+    const face = document_key === 'face';
+    const collection = face ? 'face_document' : 'documents';
+    const item = face ? record.face_document : (record.documents || {})[document_key];
+    if (!item?.storage_key) return null;
+    const reviewed = { ...item, status: action === 'APPROVE' ? 'APPROVED' : 'REJECTED', rejection_reason: action === 'REJECT' ? (rejection_reason || 'Please upload a clearer document.') : null, reviewed_at: new Date().toISOString(), reviewed_by };
+    const updated = face ? { ...record, face_document: reviewed } : { ...record, documents: { ...(record.documents || {}), [document_key]: reviewed } };
+    if (isConnected && pool) {
+      const column = face ? 'face_document' : 'documents';
+      const json = face ? JSON.stringify(reviewed) : JSON.stringify(updated.documents);
+      const status = action === 'REJECT' ? 'REJECTED' : 'PENDING';
+      const reason = action === 'REJECT' ? (rejection_reason || 'Please upload a clearer document.') : null;
+      const result = await pool.query(`UPDATE driver_kyc SET ${column} = $1::jsonb, kyc_status = $2, rejection_reason = $3 WHERE id::text = $4 RETURNING *`, [json, status, reason, String(kycId)]);
+      return result.rows[0] || updated;
+    }
+    const index = localStore.driver_kyc.findIndex(k => String(k.id) === String(kycId));
+    if (index >= 0) { localStore.driver_kyc[index] = updated; saveStore(); }
+    return updated;
+  },
+
+  async getKycById(kycId) {
+    if (isConnected && pool) {
+      const result = await pool.query('SELECT * FROM driver_kyc WHERE id::text = $1 OR driver_id::text = $1 LIMIT 1', [String(kycId)]);
+      return result.rows[0] || null;
+    }
+    return localStore.driver_kyc.find(k => String(k.id) === String(kycId) || String(k.driver_id) === String(kycId)) || null;
   },
 
   // --- BOOKINGS ---
   async getBookings(filters = {}) {
     if (isConnected && pool) {
-      try {
-        let sql = 'SELECT * FROM bookings WHERE 1=1';
-        const params = [];
-        let i = 1;
-        if (filters.customer_email) {
-          sql += ` AND LOWER(customer_email) = $${i++}`;
-          params.push(filters.customer_email.toLowerCase());
-        }
-        if (filters.assigned_driver_id) {
-          sql += ` AND assigned_driver_id::text = $${i++}`;
-          params.push(String(filters.assigned_driver_id));
-        }
-        sql += ' ORDER BY created_at DESC';
-        const res = await pool.query(sql, params);
-        if (res.rows) return res.rows;
-      } catch (e) {}
+      let sql = 'SELECT * FROM bookings WHERE 1=1';
+      const params = [];
+      let i = 1;
+      if (filters.customer_email) {
+        sql += ` AND LOWER(customer_email) = $${i++}`;
+        params.push(filters.customer_email.toLowerCase());
+      }
+      if (filters.assigned_driver_id) {
+        sql += ` AND assigned_driver_id::text = $${i++}`;
+        params.push(String(filters.assigned_driver_id));
+      }
+      sql += ' ORDER BY created_at DESC';
+      const res = await pool.query(sql, params);
+      return res.rows;
     }
 
     let bookingsList = [...localStore.bookings].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -1234,6 +1253,7 @@ module.exports = {
       pickup: bookingData.pickup,
       destination: bookingData.destination,
       journey_date: bookingData.journey_date,
+      return_date: bookingData.return_date || null,
       journey_time: bookingData.journey_time || '06:00 AM',
       passengers: parseInt(bookingData.passengers, 10) || 1,
       vehicle_id: bookingData.vehicle_id || null,
@@ -1269,16 +1289,16 @@ module.exports = {
         await client.query(`
           INSERT INTO bookings (
             id, booking_code, customer_name, customer_phone, customer_email, trip_type,
-            pickup, destination, journey_date, journey_time, passengers, vehicle_id,
+            pickup, destination, journey_date, return_date, journey_time, passengers, vehicle_id,
             vehicle_name, vehicle_reg, quoted_amount, advance_paid, balance_amount,
             payment_method, payment_status, status, assigned_driver_id, assigned_driver_name,
             assigned_driver_phone, notes, created_at
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
           )
         `, [
           newBooking.id, newBooking.booking_code, newBooking.customer_name, newBooking.customer_phone, newBooking.customer_email,
-          newBooking.trip_type, newBooking.pickup, newBooking.destination, newBooking.journey_date, newBooking.journey_time,
+          newBooking.trip_type, newBooking.pickup, newBooking.destination, newBooking.journey_date, newBooking.return_date, newBooking.journey_time,
           newBooking.passengers, newBooking.vehicle_id, newBooking.vehicle_name, newBooking.vehicle_reg, newBooking.quoted_amount,
           newBooking.advance_paid, newBooking.balance_amount, newBooking.payment_method, newBooking.payment_status,
           newBooking.status, newBooking.assigned_driver_id, newBooking.assigned_driver_name, newBooking.assigned_driver_phone,
@@ -1342,23 +1362,238 @@ module.exports = {
     return newBooking;
   },
 
+  async getBookingPayments(bookingId) {
+    if (isConnected && pool) {
+      const result = await pool.query(
+        'SELECT * FROM booking_payments WHERE booking_id::text = $1 ORDER BY created_at DESC',
+        [String(bookingId)]
+      );
+      return result.rows;
+    }
+    return (localStore.booking_payments || [])
+      .filter(payment => String(payment.booking_id) === String(bookingId))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  },
+
+  async recordBookingPayment({ bookingId, driverId, driverName, amount, paymentMethod, idempotencyKey }) {
+    const roundMoney = value => Math.round(Number(value || 0) * 100) / 100;
+    const paymentId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const date = createdAt.slice(0, 10);
+    const time = new Date(createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+
+    if (isConnected && pool) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [idempotencyKey]);
+
+        const existing = await client.query(
+          'SELECT * FROM booking_payments WHERE idempotency_key = $1',
+          [idempotencyKey]
+        );
+        if (existing.rows.length) {
+          const prior = existing.rows[0];
+          const sameRequest = String(prior.booking_id) === String(bookingId)
+            && String(prior.driver_id) === String(driverId)
+            && roundMoney(prior.amount) === roundMoney(amount)
+            && prior.payment_method === paymentMethod;
+          if (!sameRequest) {
+            await client.query('ROLLBACK');
+            return { error: 'IDEMPOTENCY_CONFLICT' };
+          }
+          const booking = await client.query('SELECT * FROM bookings WHERE id::text = $1', [String(bookingId)]);
+          await client.query('COMMIT');
+          return { payment: prior, booking: booking.rows[0] || null, replayed: true };
+        }
+
+        const bookingResult = await client.query(
+          'SELECT * FROM bookings WHERE id::text = $1 FOR UPDATE',
+          [String(bookingId)]
+        );
+        const booking = bookingResult.rows[0];
+        if (!booking) {
+          await client.query('ROLLBACK');
+          return { error: 'NOT_FOUND' };
+        }
+        if (String(booking.assigned_driver_id) !== String(driverId)) {
+          await client.query('ROLLBACK');
+          return { error: 'FORBIDDEN' };
+        }
+        if (booking.status === 'CANCELLED') {
+          await client.query('ROLLBACK');
+          return { error: 'BOOKING_CANCELLED' };
+        }
+
+        const quote = roundMoney(booking.quoted_amount);
+        const paid = roundMoney(booking.advance_paid);
+        const balance = roundMoney(quote - paid);
+        if (amount > balance) {
+          await client.query('ROLLBACK');
+          return { error: 'AMOUNT_EXCEEDS_BALANCE', balance };
+        }
+
+        const nextPaid = roundMoney(paid + amount);
+        const nextBalance = roundMoney(quote - nextPaid);
+        const paymentResult = await client.query(`
+          INSERT INTO booking_payments (
+            id, booking_id, booking_code, driver_id, driver_name, amount,
+            payment_method, idempotency_key, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING *
+        `, [
+          paymentId, booking.id, booking.booking_code, String(driverId), driverName,
+          amount, paymentMethod, idempotencyKey, createdAt
+        ]);
+        const updatedBooking = await client.query(`
+          UPDATE bookings
+          SET advance_paid = $1, balance_amount = $2, payment_status = $3,
+              payment_method = $4, updated_at = NOW()
+          WHERE id = $5
+          RETURNING *
+        `, [
+          nextPaid,
+          nextBalance,
+          nextBalance === 0 ? 'PAID' : 'PARTIAL',
+          paymentMethod,
+          booking.id
+        ]);
+        await client.query(`
+          INSERT INTO company_transactions (
+            id, type, category, title, amount, payment_mode, reference_no,
+            party_name, party_type, related_booking_code, date, time, status, notes, created_at
+          ) VALUES ($1, 'PAY_IN', 'CUSTOMER_BOOKING_COLLECTION', $2, $3, $4, $5, $6, 'CUSTOMER', $7, $8, $9, 'COMPLETED', $10, $11)
+        `, [
+          `tx-bpay-${paymentId}`,
+          `Customer payment collected for booking ${booking.booking_code}`,
+          amount,
+          paymentMethod,
+          `BOOKING-${booking.booking_code}-${paymentId.slice(0, 8)}`,
+          booking.customer_name,
+          booking.booking_code,
+          date,
+          time,
+          `Recorded by driver ${driverName} (${driverId})`,
+          createdAt
+        ]);
+        await client.query('COMMIT');
+        return { payment: paymentResult.rows[0], booking: updatedBooking.rows[0], replayed: false };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+
+    const existing = (localStore.booking_payments || []).find(payment => payment.idempotency_key === idempotencyKey);
+    if (existing) {
+      const sameRequest = String(existing.booking_id) === String(bookingId)
+        && String(existing.driver_id) === String(driverId)
+        && roundMoney(existing.amount) === roundMoney(amount)
+        && existing.payment_method === paymentMethod;
+      if (!sameRequest) return { error: 'IDEMPOTENCY_CONFLICT' };
+      const booking = localStore.bookings.find(item => String(item.id) === String(bookingId)) || null;
+      return { payment: existing, booking, replayed: true };
+    }
+
+    const booking = localStore.bookings.find(item => String(item.id) === String(bookingId));
+    if (!booking) return { error: 'NOT_FOUND' };
+    if (String(booking.assigned_driver_id) !== String(driverId)) return { error: 'FORBIDDEN' };
+    if (booking.status === 'CANCELLED') return { error: 'BOOKING_CANCELLED' };
+
+    const quote = roundMoney(booking.quoted_amount);
+    const paid = roundMoney(booking.advance_paid);
+    const balance = roundMoney(quote - paid);
+    if (amount > balance) return { error: 'AMOUNT_EXCEEDS_BALANCE', balance };
+
+    const nextPaid = roundMoney(paid + amount);
+    const nextBalance = roundMoney(quote - nextPaid);
+    const payment = {
+      id: paymentId,
+      booking_id: booking.id,
+      booking_code: booking.booking_code,
+      driver_id: String(driverId),
+      driver_name: driverName,
+      amount,
+      payment_method: paymentMethod,
+      idempotency_key: idempotencyKey,
+      created_at: createdAt
+    };
+    const updatedBooking = {
+      ...booking,
+      advance_paid: nextPaid,
+      balance_amount: nextBalance,
+      payment_status: nextBalance === 0 ? 'PAID' : 'PARTIAL',
+      payment_method: paymentMethod,
+      updated_at: createdAt
+    };
+    const transaction = {
+      id: `tx-bpay-${paymentId}`,
+      type: 'PAY_IN',
+      category: 'CUSTOMER_BOOKING_COLLECTION',
+      title: `Customer payment collected for booking ${booking.booking_code}`,
+      amount,
+      payment_mode: paymentMethod,
+      reference_no: `BOOKING-${booking.booking_code}-${paymentId.slice(0, 8)}`,
+      party_name: booking.customer_name,
+      party_type: 'CUSTOMER',
+      related_booking_code: booking.booking_code,
+      date,
+      time,
+      status: 'COMPLETED',
+      notes: `Recorded by driver ${driverName} (${driverId})`,
+      created_at: createdAt
+    };
+
+    localStore.booking_payments = [payment, ...(localStore.booking_payments || [])];
+    localStore.transactions = [transaction, ...(localStore.transactions || [])];
+    localStore.bookings[localStore.bookings.indexOf(booking)] = updatedBooking;
+    saveStore();
+    return { payment, booking: updatedBooking, replayed: false };
+  },
+
   async updateBookingStatus(id, status) {
+    const persistedStatus = status === 'ON_TRIP' ? 'IN_PROGRESS' : status;
+    if (isConnected && pool) {
+      const result = await pool.query(
+        'UPDATE bookings SET status = $1, updated_at = NOW() WHERE id::text = $2 RETURNING *',
+        [persistedStatus, String(id)]
+      );
+      return result.rows[0] || null;
+    }
+
     const bIndex = localStore.bookings.findIndex(b => String(b.id) === String(id));
     if (bIndex !== -1) {
-      localStore.bookings[bIndex].status = status;
+      localStore.bookings[bIndex].status = persistedStatus;
       saveStore();
-    }
-    if (isConnected && pool) {
-      try {
-        await pool.query('UPDATE bookings SET status = $1, updated_at = NOW() WHERE id::text = $2', [status, String(id)]);
-      } catch (e) {
-        console.error('PostgreSQL booking update status err:', e.message);
-      }
     }
     return bIndex !== -1 ? localStore.bookings[bIndex] : null;
   },
 
   async updateBooking(id, updates) {
+    if (isConnected && pool) {
+      const fields = [];
+      const values = [];
+      for (const [key, value] of Object.entries(updates)) {
+        if (!/^[a-z_]+$/.test(key)) throw new Error('Unsupported booking update field.');
+        fields.push(`${key} = $${values.length + 1}`);
+        values.push(value);
+      }
+      if (updates.quoted_amount !== undefined) {
+        values.push(Number(updates.quoted_amount));
+        const quoteParameter = `$${values.length}`;
+        fields.push(`balance_amount = ${quoteParameter} - advance_paid`);
+        fields.push(`payment_status = CASE WHEN advance_paid >= ${quoteParameter} THEN 'PAID' WHEN advance_paid > 0 THEN 'PARTIAL' ELSE 'PENDING' END`);
+      }
+      if (fields.length === 0) {
+        const existing = await pool.query('SELECT * FROM bookings WHERE id::text = $1', [String(id)]);
+        return existing.rows[0] || null;
+      }
+      values.push(String(id));
+      const result = await pool.query(`UPDATE bookings SET ${fields.join(', ')}, updated_at = NOW() WHERE id::text = $${values.length} RETURNING *`, values);
+      return result.rows[0] || null;
+    }
     const bIndex = localStore.bookings.findIndex(b => String(b.id) === String(id));
     if (bIndex !== -1) {
       const cur = localStore.bookings[bIndex];
@@ -1376,21 +1611,6 @@ module.exports = {
         updated_at: new Date().toISOString()
       };
       saveStore();
-    }
-    if (isConnected && pool) {
-      try {
-        const fields = [];
-        const values = [];
-        let i = 1;
-        for (const [k, v] of Object.entries(updates)) {
-          fields.push(`${k} = $${i++}`);
-          values.push(v);
-        }
-        values.push(String(id));
-        await pool.query(`UPDATE bookings SET ${fields.join(', ')}, updated_at = NOW() WHERE id::text = $${i}`, values);
-      } catch (e) {
-        console.error('PostgreSQL booking update err:', e.message);
-      }
     }
     return bIndex !== -1 ? localStore.bookings[bIndex] : null;
   },
@@ -1420,41 +1640,65 @@ module.exports = {
       status: 'ASSIGNED'
     };
 
+    if (isConnected && pool) {
+      const result = await pool.query(`
+        UPDATE bookings
+        SET assigned_driver_id = $1, assigned_driver_name = $2, assigned_driver_phone = $3,
+            vehicle_reg = $4, status = 'ASSIGNED', updated_at = NOW()
+        WHERE id::text = $5
+        RETURNING *
+      `, [driver_id, driver_name, driver_phone, vehicle_reg || null, String(bookingId)]);
+      return result.rows[0] || null;
+    }
+
     const bIndex = localStore.bookings.findIndex(b => String(b.id) === String(bookingId));
     if (bIndex !== -1) {
       localStore.bookings[bIndex] = { ...localStore.bookings[bIndex], ...updates };
       saveStore();
     }
 
-    if (isConnected && pool) {
-      try {
-        await pool.query(`
-          UPDATE bookings 
-          SET assigned_driver_id = $1, assigned_driver_name = $2, assigned_driver_phone = $3, vehicle_reg = $4, status = 'ASSIGNED', updated_at = NOW()
-          WHERE id::text = $5
-        `, [driver_id, driver_name, driver_phone, vehicle_reg || null, String(bookingId)]);
-      } catch (e) {
-        console.error('PostgreSQL assign driver err:', e.message);
-      }
-    }
     return bIndex !== -1 ? localStore.bookings[bIndex] : null;
+  },
+
+  async claimOpenBooking(bookingId, { driver_id, driver_name, driver_phone, vehicle_reg }) {
+    if (isConnected && pool) {
+      const result = await pool.query(`
+        UPDATE bookings
+        SET assigned_driver_id = $1, assigned_driver_name = $2, assigned_driver_phone = $3,
+            vehicle_reg = $4, status = 'ASSIGNED', updated_at = NOW()
+        WHERE id::text = $5 AND assigned_driver_id IS NULL AND status IN ('CONFIRMED', 'REQUESTED')
+        RETURNING *
+      `, [driver_id, driver_name, driver_phone, vehicle_reg || null, String(bookingId)]);
+      return result.rows[0] || null;
+    }
+
+    const bIndex = localStore.bookings.findIndex(b => String(b.id) === String(bookingId));
+    if (bIndex < 0 || localStore.bookings[bIndex].assigned_driver_id || !['CONFIRMED', 'REQUESTED'].includes(String(localStore.bookings[bIndex].status).toUpperCase())) return null;
+    localStore.bookings[bIndex] = {
+      ...localStore.bookings[bIndex],
+      assigned_driver_id: driver_id,
+      assigned_driver_name: driver_name,
+      assigned_driver_phone: driver_phone,
+      vehicle_reg: vehicle_reg || null,
+      status: 'ASSIGNED'
+    };
+    saveStore();
+    return localStore.bookings[bIndex];
   },
 
   // --- COMPANY DUTIES ---
   async getDuties(filters = {}) {
     if (isConnected && pool) {
-      try {
-        let sql = 'SELECT * FROM company_duties WHERE 1=1';
-        const params = [];
-        let i = 1;
-        if (filters.driver_id) {
-          sql += ` AND driver_id::text = $${i++}`;
-          params.push(String(filters.driver_id));
-        }
-        sql += ' ORDER BY created_at DESC';
-        const res = await pool.query(sql, params);
-        if (res.rows) return res.rows;
-      } catch (e) {}
+      let sql = 'SELECT * FROM company_duties WHERE 1=1';
+      const params = [];
+      let i = 1;
+      if (filters.driver_id) {
+        sql += ` AND driver_id::text = $${i++}`;
+        params.push(String(filters.driver_id));
+      }
+      sql += ' ORDER BY created_at DESC';
+      const res = await pool.query(sql, params);
+      return res.rows;
     }
 
     let dutiesList = [...localStore.company_duties].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -1465,16 +1709,23 @@ module.exports = {
   },
 
   async startDuty(dutyData) {
+    const dutyNow = new Date();
+    const dutyDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(dutyNow);
+    const loginTime = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(dutyNow);
     const dutyCode = `DUTY-${Math.floor(1000 + Math.random() * 9000)}`;
     const newDuty = {
       id: dutyData.id || crypto.randomUUID(),
       duty_code: dutyCode,
+      shift_name: dutyData.shift_name || (dutyData.external_trip_id?.includes('Shift') ? dutyData.external_trip_id : 'Shift 1'),
       driver_id: dutyData.driver_id || null,
       driver_name: dutyData.driver_name || 'Driver',
       company_name: dutyData.company_name,
       external_trip_id: dutyData.external_trip_id,
-      vehicle_reg: dutyData.vehicle_reg || 'KA01AE1234',
-      login_time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      pickup_location: dutyData.pickup_location,
+      destination_location: dutyData.destination_location,
+      route_details: dutyData.shift_name ? `[${dutyData.shift_name}] ${dutyData.route_details || ''}` : (dutyData.route_details || ''),
+      vehicle_reg: dutyData.vehicle_reg,
+      login_time: loginTime,
       logout_time: null,
       start_km: Number(dutyData.start_km),
       end_km: null,
@@ -1482,41 +1733,70 @@ module.exports = {
       toll_parking_allowance: 0,
       food_allowance: 0,
       duty_selfie_url: dutyData.duty_selfie_url || null,
-      duty_face_verified: dutyData.duty_face_verified !== false,
-      duty_face_match_score: dutyData.duty_face_match_score || 99.1,
+      duty_face_verified: Boolean(dutyData.duty_face_verified),
+      duty_face_match_score: dutyData.duty_face_match_score || null,
       status: 'ON_DUTY',
-      duty_date: new Date().toISOString().split('T')[0],
+      duty_date: dutyDate,
       admin_note: null,
       created_at: new Date().toISOString()
     };
 
-    localStore.company_duties.unshift(newDuty);
-    saveStore();
-
     if (isConnected && pool) {
+      const client = await pool.connect();
       try {
-        await pool.query(`
+        await client.query('BEGIN');
+        const active = await client.query("SELECT id FROM company_duties WHERE driver_id::text = $1 AND status = 'ON_DUTY' LIMIT 1", [String(newDuty.driver_id)]);
+        if (active.rows.length) {
+          const error = new Error('You already have an active company duty. Check out before starting another.');
+          error.code = 'DUTY_ALREADY_ACTIVE';
+          throw error;
+        }
+        const result = await client.query(`
           INSERT INTO company_duties (
-            id, duty_code, driver_id, driver_name, company_name, external_trip_id,
+            id, duty_code, shift_name, driver_id, driver_name, company_name, external_trip_id, pickup_location, destination_location, route_details,
             vehicle_reg, login_time, start_km, duty_selfie_url, duty_face_verified,
             duty_face_match_score, status, duty_date, created_at
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-          )
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+          ) RETURNING *
         `, [
-          newDuty.id, newDuty.duty_code, newDuty.driver_id, newDuty.driver_name, newDuty.company_name,
-          newDuty.external_trip_id, newDuty.vehicle_reg, newDuty.login_time, newDuty.start_km,
+          newDuty.id, newDuty.duty_code, newDuty.shift_name, newDuty.driver_id, newDuty.driver_name, newDuty.company_name,
+          newDuty.external_trip_id, newDuty.pickup_location, newDuty.destination_location, newDuty.route_details,
+          newDuty.vehicle_reg, newDuty.login_time, newDuty.start_km,
           newDuty.duty_selfie_url, newDuty.duty_face_verified, newDuty.duty_face_match_score,
           newDuty.status, newDuty.duty_date, newDuty.created_at
         ]);
+        await client.query('COMMIT');
+        return result.rows[0] || newDuty;
       } catch (e) {
-        console.error('PostgreSQL start duty err:', e.message);
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
       }
     }
+    if (localStore.company_duties.some(d => String(d.driver_id) === String(newDuty.driver_id) && d.status === 'ON_DUTY')) {
+      const error = new Error('You already have an active company duty. Check out before starting another.');
+      error.code = 'DUTY_ALREADY_ACTIVE';
+      throw error;
+    }
+    localStore.company_duties.unshift(newDuty);
+    saveStore();
     return newDuty;
   },
 
   async endDuty(dutyId, { end_km, toll_parking, food_allowance }) {
+    if (isConnected && pool) {
+      const logoutTime = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(new Date());
+      const result = await pool.query(`
+        UPDATE company_duties
+        SET end_km = $1, daily_km = $1 - start_km, toll_parking_allowance = $2,
+            food_allowance = $3, logout_time = $4, status = 'SUBMITTED'
+        WHERE (id::text = $5 OR duty_code = $5) AND status = 'ON_DUTY' AND $1 >= start_km
+        RETURNING *
+      `, [Number(end_km), Number(toll_parking) || 0, Number(food_allowance) || 0, logoutTime, String(dutyId)]);
+      return result.rows[0] || null;
+    }
     const dIndex = localStore.company_duties.findIndex(d => String(d.id) === String(dutyId) || d.duty_code === dutyId);
     let updatedDuty = null;
 
@@ -1524,14 +1804,15 @@ module.exports = {
       const duty = localStore.company_duties[dIndex];
       const startKm = Number(duty.start_km);
       const endKmNum = Number(end_km);
-      const totalKm = endKmNum >= startKm ? endKmNum - startKm : 0;
+      if (endKmNum < startKm) return null;
+      const totalKm = endKmNum - startKm;
 
       const updates = {
         end_km: endKmNum,
         daily_km: totalKm,
         toll_parking_allowance: Number(toll_parking) || 0,
         food_allowance: Number(food_allowance) || 0,
-        logout_time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        logout_time: new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(new Date()),
         status: 'SUBMITTED'
       };
 
@@ -1539,17 +1820,6 @@ module.exports = {
       updatedDuty = localStore.company_duties[dIndex];
       saveStore();
 
-      if (isConnected && pool) {
-        try {
-          await pool.query(`
-            UPDATE company_duties 
-            SET end_km = $1, daily_km = $2, toll_parking_allowance = $3, food_allowance = $4, logout_time = $5, status = 'SUBMITTED'
-            WHERE id::text = $6 OR duty_code = $6
-          `, [updates.end_km, updates.daily_km, updates.toll_parking_allowance, updates.food_allowance, updates.logout_time, String(dutyId)]);
-        } catch (e) {
-          console.error('PostgreSQL end duty err:', e.message);
-        }
-      }
     }
     return updatedDuty;
   },
@@ -1818,27 +2088,32 @@ module.exports = {
     const duties = await this.getDuties();
     const bookings = await this.getBookings();
     const now = new Date();
-    const selectedMonth = monthYear || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const indiaDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(now);
+    const selectedMonth = monthYear || indiaDate.slice(0, 7);
 
     return drivers.map(drv => {
       const driverDuties = duties.filter(d => 
         (String(d.driver_id) === String(drv.id) || (d.driver_name && d.driver_name.toLowerCase() === drv.name.toLowerCase())) &&
-        (d.duty_date || d.created_at || '').startsWith(selectedMonth)
+        (d.duty_date || d.created_at || '').startsWith(selectedMonth) && d.status !== 'REJECTED'
       );
 
       const uniqueDays = new Set(driverDuties.map(d => d.duty_date || (d.created_at ? d.created_at.slice(0, 10) : '')));
       uniqueDays.delete('');
       const daysWorked = uniqueDays.size;
 
-      const totalKm = driverDuties.reduce((s, d) => s + (Number(d.daily_km) || 0), 0);
+      const completedDuties = driverDuties.filter(d => d.logout_time && Number(d.end_km) >= Number(d.start_km) && ['SUBMITTED', 'VERIFIED', 'VERIFIED_BY_ADMIN'].includes(String(d.status).toUpperCase()));
+      const totalKm = completedDuties.reduce((s, d) => s + (Number(d.daily_km) || 0), 0);
       const totalTollParking = driverDuties.reduce((s, d) => s + (Number(d.toll_parking_allowance) || 0), 0);
       const totalFoodAllowance = driverDuties.reduce((s, d) => s + (Number(d.food_allowance) || 0), 0);
       const totalDutyAllowance = totalTollParking + totalFoodAllowance;
 
-      const baseSalary = 18000;
+      const salarySettings = drv.monthlySalarySettings || {};
+      const baseSalary = Number(salarySettings.baseSalary) || 0;
+      const perKmRate = Number(salarySettings.perKmRate) || 0;
+      const perDutyAllowance = Number(salarySettings.perDutyAllowance) || 0;
       const attendanceBonus = daysWorked * 250;
-      const kmIncentive = Math.round(totalKm * 2.5);
-      const grossSalary = baseSalary + attendanceBonus + kmIncentive + totalDutyAllowance;
+      const kmIncentive = Math.round(totalKm * perKmRate);
+      const grossSalary = baseSalary + attendanceBonus + kmIncentive + (completedDuties.length * perDutyAllowance) + totalDutyAllowance;
       const deductions = 0;
       const netPayable = grossSalary - deductions;
 
@@ -1855,12 +2130,14 @@ module.exports = {
         assigned_vehicle: drv.assignedVehicleReg,
         month: selectedMonth,
         days_present: daysWorked,
-        total_duties_completed: driverDuties.length,
+        total_duties_completed: completedDuties.length,
         total_passenger_trips: assignedTrips.length,
         total_km: totalKm,
         base_salary: baseSalary,
         attendance_bonus: attendanceBonus,
         km_incentive: kmIncentive,
+        per_km_rate: perKmRate,
+        per_duty_allowance: completedDuties.length * perDutyAllowance,
         daily_allowances: totalDutyAllowance,
         deductions,
         gross_salary: grossSalary,
@@ -1882,61 +2159,98 @@ module.exports = {
     return localStore.invoices;
   },
 
-  async generateInvoice({
-    client_name,
-    client_type,
-    client_gstin,
-    client_address,
-    billing_period,
-    invoice_date,
-    due_date,
-    total_trips,
-    total_km,
-    subtotal,
-    cgst,
-    sgst,
-    grand_total,
-    items,
-    vehicle_name,
-    vehicle_reg,
-    payment_method,
-    notes,
-    status
-  }) {
-    const sub = Number(subtotal) || 45000;
-    const calcCgst = cgst !== undefined ? Number(cgst) : Math.round(sub * 0.025);
-    const calcSgst = sgst !== undefined ? Number(sgst) : Math.round(sub * 0.025);
+  async generateInvoice(params) {
+    const {
+      client_name,
+      client_type,
+      client_gstin,
+      client_address,
+      client_phone,
+      billing_period,
+      invoice_date,
+      invoice_time,
+      invoice_number,
+      due_date,
+      total_trips,
+      total_km,
+      subtotal,
+      cgst,
+      sgst,
+      grand_total,
+      items,
+      vehicle_name,
+      vehicle_reg,
+      vehicle_type,
+      vehicle_model,
+      supervisor_name,
+      indication_date,
+      transport_company_name,
+      place_of_supply,
+      hsn_sac,
+      quantity,
+      rate_per_unit,
+      gst_rate,
+      gsp_rent,
+      tds_cgst,
+      tds_amount,
+      round_off,
+      amount_in_words,
+      payment_method,
+      notes,
+      status
+    } = params;
+    const sub = Number(subtotal);
+    const rateGst = Number(gst_rate || 5);
+    const calcCgst = cgst !== undefined ? Number(cgst) : Math.round(sub * (rateGst / 200));
+    const calcSgst = sgst !== undefined ? Number(sgst) : Math.round(sub * (rateGst / 200));
     const total = grand_total !== undefined ? Number(grand_total) : (sub + calcCgst + calcSgst);
 
     const newInv = {
       id: crypto.randomUUID(),
-      invoice_number: `SJT-INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
-      client_name: client_name || 'Tata Consultancy Services Ltd.',
+      invoice_number: invoice_number || `26-27/${54 + (localStore.invoices?.length || 0)}`,
+      client_name: String(client_name || '').trim(),
       client_type: client_type || 'CORPORATE',
-      client_gstin: client_gstin || '29AAACT2727Q1ZW',
-      client_address: client_address || 'Bengaluru, Karnataka',
+      client_gstin: client_gstin || '',
+      client_address: client_address || '',
+      client_phone: client_phone || '',
+      place_of_supply: place_of_supply || '29-Karnataka',
       billing_period: billing_period || `${new Date().toLocaleString('default', { month: 'short' })} ${new Date().getFullYear()}`,
       invoice_date: invoice_date || new Date().toISOString().split('T')[0],
+      invoice_time: invoice_time || '11:37 AM',
       due_date: due_date || new Date(Date.now() + 15 * 86400000).toISOString().split('T')[0],
       total_trips: Number(total_trips) || 1,
-      total_km: Number(total_km) || 146,
+      total_km: Number(total_km) || 0,
       subtotal: sub,
       cgst: calcCgst,
       sgst: calcSgst,
       grand_total: total,
-      vehicle_name: vehicle_name || 'Tempo Traveller 17 Seater',
-      vehicle_reg: vehicle_reg || 'KA 05 AB 1234',
+      vehicle_name: vehicle_name || '',
+      vehicle_reg: vehicle_reg || '',
+      vehicle_type: vehicle_type || 'SEDAN',
+      vehicle_model: vehicle_model || '2024 / ETIOS',
+      supervisor_name: supervisor_name || 'SHARANAPPA',
+      indication_date: indication_date || invoice_date || new Date().toISOString().split('T')[0],
+      transport_company_name: transport_company_name || client_name,
+      hsn_sac: hsn_sac || '9964',
+      quantity: Number(quantity) || Number(total_trips) || 76,
+      rate_per_unit: Number(rate_per_unit) || (sub && quantity ? Math.round(sub / quantity) : 650),
+      gst_rate: rateGst,
+      gsp_rent: Number(gsp_rent || 0),
+      tds_cgst: Number(tds_cgst || 0),
+      tds_amount: Number(tds_amount || 0),
+      round_off: Number(round_off || 0),
+      amount_in_words: amount_in_words || '',
       items: items && items.length > 0 ? items : [
         {
-          description: `Passenger Transport - ${client_name || 'Commercial Duty'}`,
-          vehicleName: vehicle_name || 'Tempo Traveller 17 Seater',
-          daysOrKm: Number(total_km) || 146,
-          rate: Math.round(sub / (Number(total_km) || 146)),
+          description: params.item_name || `Passenger Transport - ${client_name || 'Corporate Duty'}`,
+          vehicleName: vehicle_name || '',
+          daysOrKm: Number(quantity) || Number(total_km) || 76,
+          rate: Number(rate_per_unit) || 650,
           amount: sub
         }
       ],
       payment_method: payment_method || 'NEFT / RTGS / Razorpay',
-      notes: notes || 'GST SAC Code: 996412 - Passenger Transport Services',
+      notes: notes || 'GST SAC Code: 9964 - Passenger Transport Services',
       status: status || 'ISSUED',
       created_at: new Date().toISOString()
     };

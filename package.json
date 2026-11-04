@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test_booking_payments.test.js test_booking_payments_api.test.js"
   },
   "engines": {
     "node": ">=18.0.0"
