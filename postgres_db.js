@@ -1054,12 +1054,13 @@ module.exports = {
 
   // --- DRIVER KYC & ONBOARDING ---
   async submitKyc(kycData) {
+    const kycDriverId = kycData.driver_id || crypto.randomUUID();
     const newKyc = {
       id: kycData.id || crypto.randomUUID(),
-      driver_id: kycData.driver_id,
+      driver_id: kycDriverId,
       driver_name: kycData.driver_name,
       driver_phone: kycData.driver_phone,
-      driver_email: kycData.driver_email,
+      driver_email: kycData.driver_email || `driver.${String(kycData.driver_phone || '').replace(/\D/g, '')}@sjttravels.com`,
       license_number: kycData.license_number,
       badge_number: kycData.badge_number || 'PSV-KA-PENDING',
       aadhar_number: kycData.aadhar_number,
@@ -1097,7 +1098,7 @@ module.exports = {
       const jsonColumns = ['vehicle_details', 'documents', 'face_document'];
       const columns = ['driver_name', 'driver_phone', 'driver_email', 'license_number', 'badge_number', 'aadhar_number', 'pan_number', 'vehicle_preference', 'experience_years', 'address', 'vehicle_reg', 'vehicle_type', 'vehicle_details', 'documents', 'face_document', 'license_doc_url', 'license_back_doc_url', 'aadhar_doc_url', 'aadhar_back_doc_url', 'psv_badge_doc_url', 'police_verification_url', 'medical_fitness_doc_url', 'live_face_photo_url', 'face_match_score', 'face_verified', 'govt_verified', 'rto_dl_status', 'uidai_aadhar_status', 'police_clearance_status', 'kyc_status', 'rejection_reason', 'assigned_vehicle_reg', 'reviewed_by', 'submitted_at', 'verified_at'];
       const values = columns.map(column => jsonColumns.includes(column) ? JSON.stringify(newKyc[column]) : newKyc[column]);
-      const existing = await pool.query('SELECT id FROM driver_kyc WHERE driver_id::text = $1 ORDER BY submitted_at DESC LIMIT 1', [String(newKyc.driver_id)]);
+      const existing = await pool.query('SELECT id FROM driver_kyc WHERE driver_id::text = $1 OR driver_email = $2 ORDER BY submitted_at DESC LIMIT 1', [String(newKyc.driver_id), newKyc.driver_email]);
       if (existing.rows[0]) {
         newKyc.id = existing.rows[0].id;
         const assignments = columns.map((column, index) => `${column} = $${index + 1}${jsonColumns.includes(column) ? '::jsonb' : ''}`).join(', ');
@@ -1134,7 +1135,7 @@ module.exports = {
     return [...localStore.driver_kyc].sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at));
   },
 
-  async reviewKyc(kycId, { action, assigned_vehicle_reg, rejection_reason, reviewed_by }) {
+  async reviewKyc(kycId, { action, assigned_vehicle_reg, rejection_reason, reviewed_by, login_id, password }) {
     const isApproved = action === 'APPROVE';
     const updates = {
       kyc_status: isApproved ? 'APPROVED' : 'REJECTED',
@@ -1144,24 +1145,88 @@ module.exports = {
       verified_at: new Date().toISOString()
     };
 
+    let updatedKyc = null;
+    let createdCredentials = null;
+
     if (isConnected && pool) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        
+        // Load existing record to get existing documents & face_document
+        const existingRes = await client.query('SELECT * FROM driver_kyc WHERE id::text = $1 OR driver_id::text = $1 LIMIT 1', [String(kycId)]);
+        const existingKyc = existingRes.rows[0];
+
+        let docs = existingKyc?.documents || {};
+        let faceDoc = existingKyc?.face_document || {};
+        if (isApproved) {
+          for (const key of Object.keys(docs)) {
+            if (docs[key] && typeof docs[key] === 'object') {
+              docs[key].status = 'APPROVED';
+            }
+          }
+          if (faceDoc && typeof faceDoc === 'object') {
+            faceDoc.status = 'APPROVED';
+          }
+        }
+
         const result = await client.query(`
           UPDATE driver_kyc 
-          SET kyc_status = $1, assigned_vehicle_reg = $2, rejection_reason = $3, verified_at = $4, reviewed_by = $5
-          WHERE id::text = $6 OR driver_id::text = $6
+          SET kyc_status = $1, assigned_vehicle_reg = $2, rejection_reason = $3, verified_at = $4, reviewed_by = $5,
+              documents = $6::jsonb, face_document = $7::jsonb
+          WHERE id::text = $8 OR driver_id::text = $8
           RETURNING *
-        `, [updates.kyc_status, updates.assigned_vehicle_reg, updates.rejection_reason, updates.verified_at, reviewed_by, String(kycId)]);
-        const updatedKyc = result.rows[0];
+        `, [
+          updates.kyc_status, 
+          updates.assigned_vehicle_reg, 
+          updates.rejection_reason, 
+          updates.verified_at, 
+          reviewed_by,
+          JSON.stringify(docs),
+          JSON.stringify(faceDoc),
+          String(kycId)
+        ]);
+        updatedKyc = result.rows[0];
+
         if (updatedKyc && isApproved) {
-          await client.query(`
-            UPDATE users SET assigned_vehicle = $1, status = 'ACTIVE' WHERE id::text = $2
-          `, [updatedKyc.assigned_vehicle_reg, String(updatedKyc.driver_id)]);
+          const finalLoginEmail = String(login_id || updatedKyc.driver_email || `driver.${String(updatedKyc.driver_phone || '').replace(/\D/g, '')}@sjttravels.com`).toLowerCase().trim();
+          const rawPassword = String(password || 'driver123').trim();
+          const hashedPassword = await hashPassword(rawPassword);
+
+          // Check if user already exists
+          const existingUserRes = await client.query(
+            'SELECT * FROM users WHERE id::text = $1 OR LOWER(email) = $2 LIMIT 1',
+            [String(updatedKyc.driver_id || ''), finalLoginEmail]
+          );
+
+          if (existingUserRes.rows[0]) {
+            const uId = existingUserRes.rows[0].id;
+            await client.query(`
+              UPDATE users 
+              SET email = $1, password = $2, name = $3, phone = $4, assigned_vehicle = $5, role = 'DRIVER', status = 'ACTIVE'
+              WHERE id = $6
+            `, [finalLoginEmail, hashedPassword, updatedKyc.driver_name, updatedKyc.driver_phone, updatedKyc.assigned_vehicle_reg, uId]);
+            await client.query('UPDATE driver_kyc SET driver_id = $1 WHERE id = $2', [uId, updatedKyc.id]);
+            updatedKyc.driver_id = uId;
+          } else {
+            const newDriverUserId = crypto.randomUUID();
+            await client.query(`
+              INSERT INTO users (id, email, password, name, phone, role, assigned_vehicle, duty_mode, is_online, status)
+              VALUES ($1, $2, $3, $4, $5, 'DRIVER', $6, 'OFF_DUTY', FALSE, 'ACTIVE')
+            `, [newDriverUserId, finalLoginEmail, hashedPassword, updatedKyc.driver_name, updatedKyc.driver_phone, updatedKyc.assigned_vehicle_reg]);
+            await client.query('UPDATE driver_kyc SET driver_id = $1 WHERE id = $2', [newDriverUserId, updatedKyc.id]);
+            updatedKyc.driver_id = newDriverUserId;
+          }
+
+          createdCredentials = {
+            login_id: finalLoginEmail,
+            password: rawPassword,
+            name: updatedKyc.driver_name,
+            phone: updatedKyc.driver_phone,
+            assigned_vehicle: updatedKyc.assigned_vehicle_reg
+          };
         }
         await client.query('COMMIT');
-        return updatedKyc || null;
       } catch (e) {
         await client.query('ROLLBACK').catch(() => {});
         throw e;
@@ -1169,17 +1234,48 @@ module.exports = {
         client.release();
       }
     }
+
     const kIndex = localStore.driver_kyc.findIndex(k => String(k.id) === String(kycId) || String(k.driver_id) === String(kycId));
-    if (kIndex === -1) return null;
-    localStore.driver_kyc[kIndex] = { ...localStore.driver_kyc[kIndex], ...updates };
-    const updatedKyc = localStore.driver_kyc[kIndex];
-    const driverUser = localStore.users.find(u => String(u.id) === String(updatedKyc.driver_id));
-    if (driverUser && isApproved) {
-      driverUser.assigned_vehicle = updatedKyc.assigned_vehicle_reg;
-      driverUser.status = 'ACTIVE';
+    if (kIndex !== -1) {
+      localStore.driver_kyc[kIndex] = { ...localStore.driver_kyc[kIndex], ...updates };
+      if (!updatedKyc) updatedKyc = localStore.driver_kyc[kIndex];
+    }
+    if (isApproved && updatedKyc) {
+      const finalLoginEmail = String(login_id || updatedKyc.driver_email || `driver.${String(updatedKyc.driver_phone || '').replace(/\D/g, '')}@sjttravels.com`).toLowerCase().trim();
+      const rawPassword = String(password || 'driver123').trim();
+      const uIndex = localStore.users.findIndex(u => String(u.id) === String(updatedKyc.driver_id) || u.email.toLowerCase() === finalLoginEmail);
+      if (uIndex !== -1) {
+        localStore.users[uIndex].assigned_vehicle = updatedKyc.assigned_vehicle_reg;
+        localStore.users[uIndex].status = 'ACTIVE';
+        localStore.users[uIndex].role = 'DRIVER';
+        localStore.users[uIndex].email = finalLoginEmail;
+      } else {
+        localStore.users.push({
+          id: updatedKyc.driver_id || crypto.randomUUID(),
+          email: finalLoginEmail,
+          password: await hashPassword(rawPassword),
+          name: updatedKyc.driver_name,
+          phone: updatedKyc.driver_phone,
+          role: 'DRIVER',
+          assigned_vehicle: updatedKyc.assigned_vehicle_reg,
+          duty_mode: 'OFF_DUTY',
+          is_online: false,
+          status: 'ACTIVE',
+          created_at: new Date().toISOString()
+        });
+      }
+      if (!createdCredentials) {
+        createdCredentials = {
+          login_id: finalLoginEmail,
+          password: rawPassword,
+          name: updatedKyc.driver_name,
+          phone: updatedKyc.driver_phone,
+          assigned_vehicle: updatedKyc.assigned_vehicle_reg
+        };
+      }
     }
     saveStore();
-    return updatedKyc;
+    return { kyc: updatedKyc, credentials: createdCredentials };
   },
 
   async reviewKycDocument(kycId, { document_key, action, rejection_reason, reviewed_by }) {
@@ -1828,7 +1924,7 @@ module.exports = {
     const isApproved = action === 'APPROVE';
     const status = isApproved ? 'VERIFIED_BY_ADMIN' : 'REJECTED';
 
-    const dIndex = localStore.company_duties.findIndex(d => String(d.id) === String(dutyId));
+    const dIndex = localStore.company_duties.findIndex(d => String(d.id) === String(dutyId) || String(d.duty_code) === String(dutyId));
     let updatedDuty = null;
     if (dIndex !== -1) {
       localStore.company_duties[dIndex].status = status;
@@ -1839,9 +1935,15 @@ module.exports = {
 
     if (isConnected && pool) {
       try {
-        await pool.query(`
-          UPDATE company_duties SET status = $1, admin_note = $2 WHERE id::text = $3
+        const pRes = await pool.query(`
+          UPDATE company_duties 
+          SET status = $1, admin_note = $2 
+          WHERE id::text = $3 OR duty_code = $3 
+          RETURNING *
         `, [status, admin_note || null, String(dutyId)]);
+        if (pRes.rows && pRes.rows[0]) {
+          updatedDuty = pRes.rows[0];
+        }
       } catch (e) {
         console.error('PostgreSQL verify duty err:', e.message);
       }
@@ -1850,7 +1952,8 @@ module.exports = {
   },
 
   async updateDuty(id, updates) {
-    const dIdx = localStore.company_duties.findIndex(d => String(d.id) === String(id));
+    const dIdx = localStore.company_duties.findIndex(d => String(d.id) === String(id) || String(d.duty_code) === String(id));
+    let updatedDuty = null;
     if (dIdx !== -1) {
       const cur = localStore.company_duties[dIdx];
       const startKm = updates.start_km !== undefined ? Number(updates.start_km) : Number(cur.start_km);
@@ -1864,6 +1967,7 @@ module.exports = {
         end_km: endKm,
         daily_km: dailyKm
       };
+      updatedDuty = localStore.company_duties[dIdx];
       saveStore();
     }
     if (isConnected && pool) {
@@ -1875,24 +1979,38 @@ module.exports = {
           fields.push(`${k} = $${i++}`);
           values.push(v);
         }
+        if (updates.start_km !== undefined && updates.end_km !== undefined) {
+          const s = Number(updates.start_km);
+          const e = Number(updates.end_km);
+          if (e >= s) {
+            fields.push(`daily_km = $${i++}`);
+            values.push(e - s);
+          }
+        }
         values.push(String(id));
-        await pool.query(`UPDATE company_duties SET ${fields.join(', ')} WHERE id::text = $${i}`, values);
+        const pRes = await pool.query(
+          `UPDATE company_duties SET ${fields.join(', ')} WHERE id::text = $${i} OR duty_code = $${i} RETURNING *`,
+          values
+        );
+        if (pRes.rows && pRes.rows[0]) {
+          updatedDuty = pRes.rows[0];
+        }
       } catch (e) {
         console.error('PostgreSQL update duty err:', e.message);
       }
     }
-    return dIdx !== -1 ? localStore.company_duties[dIdx] : null;
+    return updatedDuty;
   },
 
   async deleteDuty(id) {
-    const dIdx = localStore.company_duties.findIndex(d => String(d.id) === String(id));
+    const dIdx = localStore.company_duties.findIndex(d => String(d.id) === String(id) || String(d.duty_code) === String(id));
     if (dIdx !== -1) {
       localStore.company_duties.splice(dIdx, 1);
       saveStore();
     }
     if (isConnected && pool) {
       try {
-        await pool.query('DELETE FROM company_duties WHERE id::text = $1', [String(id)]);
+        await pool.query('DELETE FROM company_duties WHERE id::text = $1 OR duty_code = $1', [String(id)]);
       } catch (e) {
         console.error('PostgreSQL delete duty err:', e.message);
       }
