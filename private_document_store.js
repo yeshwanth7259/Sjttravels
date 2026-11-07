@@ -113,7 +113,7 @@ function presignedGetUrl(key, expiresSeconds = 60) {
 async function put(key, bytes, contentType) {
   validateKey(key);
   if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 5 * 1024 * 1024) throw new Error('Invalid private document payload.');
-  if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw new Error('Unsupported private document type.');
+  if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain'].includes(contentType)) throw new Error('Unsupported private document type.');
   if (!remote) {
     fs.mkdirSync(localDirectory, { recursive: true });
     fs.writeFileSync(path.join(localDirectory, key), bytes, { flag: 'wx', mode: 0o600 });

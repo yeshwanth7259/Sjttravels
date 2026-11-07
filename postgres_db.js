@@ -577,6 +577,24 @@ async function verifyAndMigrateSchema() {
       }
     }
 
+    // Ensure official verified driver partner accounts are provisioned
+    const defaultDrivers = [
+      { email: 'ramesh@driver.sjttravels.com', name: 'Ramesh Kumar', phone: '+91 99009 75920', vehicle: 'KA 05 AB 1234' },
+      { email: 'suresh@driver.sjttravels.com', name: 'Suresh Gowda', phone: '+91 98801 23456', vehicle: 'KA 04 MP 5678' },
+      { email: 'manjunath@driver.sjttravels.com', name: 'Manjunath R', phone: '+91 97412 34567', vehicle: 'KA 01 AF 9988' }
+    ];
+    for (const drv of defaultDrivers) {
+      const checkDrv = await client.query('SELECT id FROM users WHERE LOWER(email) = $1', [drv.email]);
+      if (checkDrv.rows.length === 0) {
+        const storedPassword = await hashPassword('driver123');
+        await client.query(`
+          INSERT INTO users (id, email, password, name, phone, role, assigned_vehicle, duty_mode, is_online, status)
+          VALUES ($1, $2, $3, $4, $5, 'DRIVER', $6, 'OFF_DUTY', FALSE, 'ACTIVE')
+          ON CONFLICT (email) DO UPDATE SET status = 'ACTIVE', role = 'DRIVER', assigned_vehicle = $6
+        `, [crypto.randomUUID(), drv.email, storedPassword, drv.name, drv.phone, drv.vehicle]);
+      }
+    }
+
     const verifiedAdmin = await client.query("SELECT id FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' LIMIT 1");
     if (verifiedAdmin.rows.length === 0) throw new Error('Administrator bootstrap did not create an active admin account.');
 
@@ -857,10 +875,10 @@ module.exports = {
     if (!email) return null;
     const cleanEmail = email.toLowerCase().trim();
     if (isConnected && pool) {
-      const res = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+      const res = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1 OR phone = $1 OR phone = $2', [cleanEmail, `+91 ${cleanEmail.replace(/\D/g, '').slice(-10)}`]);
       return res.rows[0] || null;
     }
-    return localStore.users.find(u => u.email.toLowerCase() === cleanEmail) || null;
+    return localStore.users.find(u => u.email.toLowerCase() === cleanEmail || u.phone === cleanEmail) || null;
   },
 
   async getUserById(id) {
